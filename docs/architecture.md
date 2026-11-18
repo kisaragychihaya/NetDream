@@ -7,8 +7,9 @@
 
 ```
 backend/
-  main.go              # main()：Bind + 窗口（窗口常量）+ OnFileDrop 激活（拖入文件拿路径）
-  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
+  main.go              # main()：Bind + 窗口（窗口常量）+ OnFileDrop 激活（拖入文件拿路径）+ guardWindow
+  close.go             # 窗口关闭守卫：OnClose 否决 + workspace:closeRequested 事件 + SetDirty/CloseWindow 支撑
+  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send、PickFile（仅有的两个导出方法）
   request.go           # 未导出 helper：URL/Body 构造、头与 Cookie、响应整形、截断、h2c 传输
   script.go            # 脚本引擎（goja）：预/后执行脚本 + {{var}} 替换，全部未导出
@@ -34,7 +35,8 @@ frontend/
       socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉
       socketPanel.ts   # Socket 响应区：实时响应日志（发送/接收）+ 握手响应头
       assertionsPanel.ts # 断言与校验侧栏
-      workspaceSidebar.ts # 工作区侧栏（打开/保存/另存为 + 新建类型菜单 + 变量区 + 请求列表）
+      workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
+      closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
   src/mygo.ts          # `mygo generate` 生成，禁止手改
   style.css
 scripts/
@@ -282,12 +284,14 @@ TCP 文本判定）一律未导出。
 
 ```
 workspace.json          # {"version": 1, "name": "工作区名"}
+engine/vars.json        # 脚本变量（Record<string,string>）；缺失/解析失败 = 空
 requests/<id>.json      # 每个已保存请求一个文件，JSON（SavedRequest，缩进格式）
 ```
 
-`workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 解析失败的条目跳过。
+`workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 与
+`engine/vars.json` 解析失败的条目跳过（vars 失败 = 空变量表，不报错）。
 
-绑定 `WorkspaceService`（注意导出方法仅限这四个）：
+绑定 `WorkspaceService`（注意导出方法仅限这六个）：
 
 - `Open() (WorkspaceFile, error)` — 打开文件对话框（过滤 `.band`），读 zip 返回
   `{path, data}`；用户取消返回 `WorkspaceFile{}`（Path 为空串，前端据此判取消）。
@@ -297,7 +301,15 @@ requests/<id>.json      # 每个已保存请求一个文件，JSON（SavedReques
 - `Save(path string, data WorkspaceData) error` — 覆盖写 zip 到 path。
 - `SaveAs(data WorkspaceData) (string, error)` — 保存对话框（默认文件名 `name.band`，
   缺 `.band` 后缀自动补），写 zip 返回实际路径；取消返回 `("", nil)`。
+- `SetDirty(dirty bool)` — 前端推送工作区脏状态；脏时关闭窗口会先问过页面。
+- `CloseWindow()` — 页面用户选择「不保存」后调用：强制关闭窗口（一次性 force，
+  见 backend/close.go）。
 - 写文件先写 `path + ".tmp"` 再 `os.Rename`，避免写一半损坏原文件。
+
+窗口关闭守卫（backend/close.go）：`Window.OnClose` 里 `force || !dirty` 才放行，
+否则 `PreventDefault()` 并向页面发事件 `workspace:closeRequested`（bool 负载），
+页面弹「保存 / 不保存 / 取消」；保存成功走 `SetDirty(false)`+`CloseWindow()`，
+放弃直接 `CloseWindow()`。force 在放行时复位（一次一用）。
 
 类型：
 
@@ -342,8 +354,9 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 }
 
 type WorkspaceData struct {
-	Name     string         `json:"name"`
-	Requests []SavedRequest `json:"requests"`
+	Name     string            `json:"name"`
+	Requests []SavedRequest    `json:"requests"`
+	Vars     map[string]string `json:"vars"` // 脚本变量；读写为 zip 内 engine/vars.json
 }
 
 type WorkspaceFile struct {
@@ -392,10 +405,16 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
   binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP 追加**：
   `kind: "http" | "websocket" | "tcp"`（默认 "http"）、`messages: SavedMessage[]`
   （已存消息模板）、`socketProtocol: string`（WS 子协议，设置页编辑）。
-- 变量 store（应用级，独立于单个请求）：`getVars/setVars/updateVars/subscribeVars/loadVars`，
-  localStorage 键 `netdream.vars`（同样 300ms 防抖）；`buildRequest()` 附带
+- 变量 store（应用级，随工作区文件保存）：`getVars/setVars/updateVars/subscribeVars`，
+  **纯内存、不写 localStorage**（关闭即清空，避免凭据外泄）；`loadWorkspace` 用
+  `file.data.vars` 整体替换（走不置脏的 replaceVars 安静路径），保存时
+  `WorkspaceData.vars = getVars()` 写入 .band；`buildRequest()` 附带
   `preScript/postScript/vars`；发送返回时 `response.vars` 写回 store（带脚本时无条件下发，
   无脚本时后端原样返回故为空操作）。
+- 工作区脏跟踪：`isWorkspaceDirty()` / `setWorkspaceDirty(dirty)`（置位时同步推送
+  `WorkspaceService.setDirty`，驱动窗口关闭守卫）。置脏：`upsertEntry`、`deleteEntry`、
+  `renameEntry`、`renameWorkspace`、`setVars`（内容真变时）；清脏：`loadWorkspace`、
+  `newWorkspace`、保存成功。`loadEntry` 与编辑器字段编辑不置脏。
 - `ResponseState` 追加脚本产物（不持久化）：`scriptLogs/scriptTests/preScriptError/postScriptError`。
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
 - 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
@@ -482,7 +501,9 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 - `WorkspaceState`（state.ts，**不**进 localStorage 编辑器存档）：
   `name: string`、`path: string | null`、`entries: SavedRequest[]`（生成类型）、
   `currentId: string | null`（编辑器当前对应的条目 id；null = 未保存的新请求）。
-- 动作：`loadWorkspace(file: WorkspaceFile)`（整体载入，并加载第一条请求进编辑器）、
+- 动作：`loadWorkspace(file: WorkspaceFile)`（整体载入——含 vars 整体替换，并加载
+  第一条请求进编辑器）、`newWorkspace()`（重置为空工作区「未命名工作区」：path=null、
+  entries=[]、currentId=null、变量清空、编辑器重置为空 HTTP 请求、清脏）、
   `newRequest(kind)`（按类型重置编辑器、currentId=null）、`loadEntry(id)`、
   `deleteEntry(id)`（删的是当前条目则 currentId=null）、`renameEntry(id, name)`、
   `renameWorkspace(name)`、`snapshotCurrent(): SavedRequest`（编辑器 → 快照；命名规则
@@ -499,13 +520,22 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   HTTP 比较 method+URL、WS/TCP 比较 URL——与已入册条目不一致即视为新请求，执行后
   派生新条目，原条目原样保留**；未变的编辑按 id 原地刷新，**改过名的条目保留别名**。
 - 保存流程（main.ts）：内存即真相——「保存」把 `WorkspaceState` 整块
-  `{name, entries}` 写进 .band；有 path 走 `save`，无 path 走 `saveAs` 并写回路径
-  （取消仅影响落盘）。保存失败在响应区错误条显示。
+  `{name, entries}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
+  无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示；
+  成功（save/saveAs 两条）清脏。`saveWorkspace` 返回 boolean 供关闭/新建守卫判断
+  「真的保存成功」（saveAs 对话框取消 = false）。
+- 未保存守卫（components/closeConfirm.ts 通用三键确认框，单例）：脏时弹
+  「保存 / 继续不保存 / 取消当前操作」。四个触发点——窗口 X（Go 否决关闭并发
+  `workspace:closeRequested` 事件，直接弹框，文案「保存 / 不保存 / 取消」）、
+  新建工作区（「保存 / 取消保存 / 取消新建」）、打开 .band、拖入 .band
+  （后三个走 main.ts `guardUnsaved`，**文件选定/读取成功后才弹框**；保存成功才继续，
+  saveAs 取消则留在应用）。Esc / 点遮罩 = 取消；保存中三键禁用。
 - UI（components/workspaceSidebar.ts）：index.html 结构改为
   `<main id="app">` 两列网格——左 `<aside id="workspace-sidebar">`，原全部内容包进
   `<div id="main-area">`（**原有 id 一律不动**，组件无感）。
-  侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存为」；
-  「＋ 新建」改为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接，选中调
+  侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存 / 新建」
+  （两字一组，title 给全名；「新建」= 新建工作区，脏时先过未保存守卫）；
+  「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接，选中调
   `newRequest(kind)`）；可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
   脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
   WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章 + 名称 + 行尾 × 删除，

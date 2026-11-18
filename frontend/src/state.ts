@@ -15,9 +15,9 @@ import type {
   SSEOpen,
   WorkspaceFile,
 } from "./mygo";
+import { WorkspaceService } from "./mygo";
 
 export const STORAGE_KEY = "netdream.request";
-export const VARS_STORAGE_KEY = "netdream.vars";
 const SAVE_DELAY_MS = 300;
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
@@ -234,7 +234,25 @@ function save(): void {
   }
 }
 
-/* ---- 变量（应用级，独立于单个请求） ---- */
+/* ---- 工作区脏状态 ---- */
+
+// 变量随工作区落盘，所以改变量也是改工作区；保存成功时由 main.ts 清脏。
+// Go 侧凭这个状态决定用户点窗口 X 时是直接关窗还是先问页面。
+let workspaceDirty = false;
+
+export function isWorkspaceDirty(): boolean {
+  return workspaceDirty;
+}
+
+export function setWorkspaceDirty(dirty: boolean): void {
+  if (workspaceDirty === dirty) return;
+  workspaceDirty = dirty;
+  void WorkspaceService.setDirty(dirty).catch(() => {
+    // 推给 Go 只影响关窗时的询问，推送失败不影响页面内的状态。
+  });
+}
+
+/* ---- 变量（工作区的一部分，随 .band 落盘） ---- */
 
 let vars: Record<string, string> = {};
 const varsListeners = new Set<Listener>();
@@ -244,9 +262,9 @@ export function getVars(): Record<string, string> {
 }
 
 export function setVars(next: Record<string, string>): void {
-  vars = { ...next };
-  scheduleVarsSave();
-  for (const listener of varsListeners) listener();
+  const changed = !sameVars(vars, next);
+  replaceVars(next);
+  if (changed) setWorkspaceDirty(true);
 }
 
 export function updateVars(mutate: (next: Record<string, string>) => void): void {
@@ -262,44 +280,25 @@ export function subscribeVars(listener: Listener): () => void {
   };
 }
 
-let varsSaveTimer: number | undefined;
-
-function scheduleVarsSave(): void {
-  if (varsSaveTimer !== undefined) window.clearTimeout(varsSaveTimer);
-  varsSaveTimer = window.setTimeout(() => {
-    varsSaveTimer = undefined;
-    saveVars();
-  }, SAVE_DELAY_MS);
+// 换掉整份变量而不置脏：载入工作区时用，变量属于那个文件，替换本身不是改动。
+function replaceVars(next: Record<string, string>): void {
+  vars = { ...next };
+  for (const listener of varsListeners) listener();
 }
 
-function saveVars(): void {
-  try {
-    localStorage.setItem(VARS_STORAGE_KEY, JSON.stringify(vars));
-  } catch {
-    // 同 request：存不下也不影响页面工作。
-  }
+function sameVars(left: Record<string, string>, right: Record<string, string>): boolean {
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => left[key] === right[key]);
 }
 
-export function loadVars(): void {
-  let raw: string | null = null;
-  try {
-    raw = localStorage.getItem(VARS_STORAGE_KEY);
-  } catch {
-    raw = null;
-  }
-  if (!raw) return;
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = null;
-  }
-  if (!isRecord(parsed)) return;
+function hydrateVars(value: unknown): Record<string, string> {
   const next: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parsed)) {
-    if (typeof value === "string") next[key] = value;
+  if (!isRecord(value)) return next;
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") next[key] = item;
   }
-  setVars(next);
+  return next;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -532,8 +531,10 @@ export function buildRequest(): APIRequest {
 
 /* ---- 工作区 ---- */
 
+const EMPTY_WORKSPACE_NAME = "未命名工作区";
+
 const workspace: WorkspaceState = {
-  name: "未命名工作区",
+  name: EMPTY_WORKSPACE_NAME,
   path: null,
   entries: [],
   currentId: null,
@@ -595,17 +596,36 @@ function requestFromSaved(saved: SavedRequest): RequestState {
 }
 
 export function loadWorkspace(file: WorkspaceFile): void {
-  workspace.name = text(file.data.name) || "未命名工作区";
+  workspace.name = text(file.data.name) || EMPTY_WORKSPACE_NAME;
   workspace.path = text(file.path) || null;
   workspace.entries = file.data.requests;
+  // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
+  replaceVars(hydrateVars(file.data.vars));
   const first = workspace.entries[0];
   if (first === undefined) {
     workspace.currentId = null;
+    setWorkspaceDirty(false);
     notify();
     return;
   }
   workspace.currentId = first.id;
   applyRequest(requestFromSaved(first));
+  setWorkspaceDirty(false);
+}
+
+// 新建空工作区：条目与变量清空、回到一条空请求，且这里的一切都不算改动
+// （脏状态最后统一清掉，否则换变量/换编辑器时的 notify 会把它又点起来）。
+export function newWorkspace(): void {
+  workspace.name = EMPTY_WORKSPACE_NAME;
+  workspace.path = null;
+  workspace.entries = [];
+  workspace.currentId = null;
+  // 变量跟着工作区走，新工作区从空变量开始；走不置脏的安静路径。
+  replaceVars({});
+  // 空工作区没有条目可载入，编辑器回落到一条空 HTTP 请求（同 newRequest 语义）。
+  applyRequest(defaultRequest());
+  setWorkspaceDirty(false);
+  notify();
 }
 
 export function newRequest(kind: RequestKind = "http"): void {
@@ -625,6 +645,7 @@ export function deleteEntry(id: string): void {
   if (next.length === workspace.entries.length) return;
   workspace.entries = next;
   if (workspace.currentId === id) workspace.currentId = null;
+  setWorkspaceDirty(true);
   notify();
 }
 
@@ -632,12 +653,14 @@ export function renameEntry(id: string, name: string): void {
   const entry = workspace.entries.find((item) => item.id === id);
   if (entry === undefined || entry.name === name) return;
   entry.name = name;
+  setWorkspaceDirty(true);
   notify();
 }
 
 export function renameWorkspace(name: string): void {
   if (workspace.name === name) return;
   workspace.name = name;
+  setWorkspaceDirty(true);
   notify();
 }
 
@@ -652,6 +675,7 @@ export function upsertEntry(entry: SavedRequest): void {
   if (index < 0) workspace.entries = [...workspace.entries, entry];
   else workspace.entries[index] = entry;
   workspace.currentId = entry.id;
+  setWorkspaceDirty(true);
   notify();
 }
 
@@ -751,10 +775,5 @@ window.addEventListener("beforeunload", () => {
     window.clearTimeout(saveTimer);
     saveTimer = undefined;
     save();
-  }
-  if (varsSaveTimer !== undefined) {
-    window.clearTimeout(varsSaveTimer);
-    varsSaveTimer = undefined;
-    saveVars();
   }
 });

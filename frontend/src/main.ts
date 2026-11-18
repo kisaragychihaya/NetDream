@@ -3,6 +3,7 @@ import { runAssertions } from "./assert";
 import { mountAssertionsPanel } from "./components/assertionsPanel";
 import { mountAuthEditor } from "./components/authEditor";
 import { mountBodyEditor } from "./components/bodyEditor";
+import { mountConfirmDialog } from "./components/closeConfirm";
 import { mountKVTable } from "./components/kvTable";
 import { mountResponseView } from "./components/responseView";
 import { mountScriptEditor } from "./components/scriptEditor";
@@ -12,7 +13,7 @@ import { createTabs, type TabDef } from "./components/tabs";
 import { mountUrlBar } from "./components/urlBar";
 import { mountWorkspaceSidebar } from "./components/workspaceSidebar";
 import type { SSEMessage } from "./mygo";
-import { RequestService, WorkspaceService, type WorkspaceData } from "./mygo";
+import { RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import {
   connectSocket,
   disconnectSocket,
@@ -26,17 +27,20 @@ import {
   emptyRow,
   getRequest,
   getResponse,
+  getVars,
   getWorkspace,
+  isWorkspaceDirty,
   loadEntry,
   loadSavedRequest,
-  loadVars,
   loadWorkspace,
   newRequest,
+  newWorkspace,
   pushStreamEvent,
   renameEntry,
   renameWorkspace,
   setStreamChannel,
   setVars,
+  setWorkspaceDirty,
   setWorkspacePath,
   snapshotCurrent,
   subscribe,
@@ -227,15 +231,64 @@ function clearWorkspaceError(): void {
 
 function workspaceData(): WorkspaceData {
   const state = getWorkspace();
-  return { name: state.name, requests: state.entries };
+  return { name: state.name, requests: state.entries, vars: getVars() };
+}
+
+const UNSAVED_TITLE = "工作区有未保存的更改";
+const UNSAVED_NOTE =
+  "可以先保存这些更改；选择「不保存」会丢弃自上次保存以来的修改，选择「取消」则返回继续编辑。";
+const NEW_WORKSPACE_NOTE =
+  "保存后会继续新建空工作区；选择「取消保存」会丢弃自上次保存以来的修改继续新建，选择「取消新建」则留在当前工作区。";
+
+// 三键确认框是单例：对话框已经打开时，任何守卫的新触发都被忽略。
+const confirmDialog = mountConfirmDialog({ save: () => saveWorkspace(false) });
+
+interface UnsavedGuard {
+  /** 放弃未保存改动那一键的文案。 */
+  discard: string;
+  /** 取消当前操作那一键的文案。 */
+  cancel: string;
+  /** 副文案；缺省用通用的「保存 / 不保存 / 取消」说明。 */
+  note?: string;
+}
+
+// 未保存守卫：工作区干净就直接执行；脏时先问，保存成功或用户明确放弃后才执行。
+function guardUnsaved(action: () => void, guard: UnsavedGuard): void {
+  if (!isWorkspaceDirty()) {
+    action();
+    return;
+  }
+  confirmDialog.open({
+    title: UNSAVED_TITLE,
+    note: guard.note ?? UNSAVED_NOTE,
+    save: "保存",
+    discard: guard.discard,
+    cancel: guard.cancel,
+    proceed: action,
+  });
+}
+
+const OPEN_UNSAVED_GUARD: UnsavedGuard = { discard: "不保存", cancel: "取消" };
+const NEW_WORKSPACE_GUARD: UnsavedGuard = {
+  discard: "取消保存",
+  cancel: "取消新建",
+  note: NEW_WORKSPACE_NOTE,
+};
+
+function startNewWorkspace(): void {
+  clearWorkspaceError();
+  newWorkspace();
 }
 
 async function openWorkspace(): Promise<void> {
   try {
     const file = await WorkspaceService.open();
     if (file.path === "") return;
-    clearWorkspaceError();
-    loadWorkspace(file);
+    // 选好文件之后才问是否保存：中途取消选择文件不该丢掉当前改动。
+    guardUnsaved(() => {
+      clearWorkspaceError();
+      loadWorkspace(file);
+    }, OPEN_UNSAVED_GUARD);
   } catch (error) {
     reportWorkspaceError(error);
   }
@@ -250,14 +303,17 @@ async function openDroppedWorkspace(paths: string[]): Promise<void> {
   }
   try {
     const file = await WorkspaceService.openPath(path);
-    clearWorkspaceError();
-    loadWorkspace(file);
+    // 文件读成功才问是否保存：读取失败时当前改动原样保留。
+    guardUnsaved(() => {
+      clearWorkspaceError();
+      loadWorkspace(file);
+    }, OPEN_UNSAVED_GUARD);
   } catch (error) {
     reportWorkspaceError(error);
   }
 }
 
-async function saveWorkspace(forceSaveAs: boolean): Promise<void> {
+async function saveWorkspace(forceSaveAs: boolean): Promise<boolean> {
   upsertEntry(snapshotCurrent());
   try {
     const path = getWorkspace().path;
@@ -265,17 +321,27 @@ async function saveWorkspace(forceSaveAs: boolean): Promise<void> {
       await WorkspaceService.save(path, workspaceData());
     } else {
       const saved = await WorkspaceService.saveAs(workspaceData());
-      if (saved === "") return;
+      // 另存为对话框被取消：什么都没写，调用方不能当成已保存。
+      if (saved === "") return false;
       setWorkspacePath(saved);
     }
     clearWorkspaceError();
+    setWorkspaceDirty(false);
+    return true;
   } catch (error) {
     reportWorkspaceError(error);
+    return false;
   }
 }
 
 loadSavedRequest();
-loadVars();
+
+// 变量改为随工作区（.band 内的 vars.json）保存后，清掉旧版本留在本地的快照。
+try {
+  localStorage.removeItem("netdream.vars");
+} catch {
+  // 存储被禁用时没有可清理的东西。
+}
 
 mountUrlBar(topbar, {
   send: () => void send(),
@@ -449,9 +515,29 @@ mountWorkspaceSidebar(sidebar, {
   open: () => void openWorkspace(),
   save: () => void saveWorkspace(false),
   saveAs: () => void saveWorkspace(true),
+  newWorkspace: () => guardUnsaved(startNewWorkspace, NEW_WORKSPACE_GUARD),
   newRequest: (kind) => newRequest(kind),
   load: (id) => loadEntry(id),
   remove: (id) => deleteEntry(id),
   rename: (id, name) => renameEntry(id, name),
   renameWorkspace: (name) => renameWorkspace(name),
+});
+
+function closeWindow(): void {
+  void WorkspaceService.closeWindow().catch(() => {
+    // 用户已经选择放弃更改，关窗失败没有别的补救办法。
+  });
+}
+
+// 工作区脏时 Go 否决用户点窗口 X 的关闭并发来这条事件：问是否保存、放弃或返回。
+// 事件本身已经代表「脏」，所以这里直接开框，不再过 guardUnsaved 的脏判断。
+events.workspaceCloseRequested.on(() => {
+  confirmDialog.open({
+    title: UNSAVED_TITLE,
+    note: UNSAVED_NOTE,
+    save: "保存",
+    discard: "不保存",
+    cancel: "取消",
+    proceed: closeWindow,
+  });
 });

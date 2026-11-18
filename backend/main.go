@@ -35,6 +35,8 @@ func main() {
 		// 激活 mygo 原生文件拖放的路径投递（需至少一个 Go 侧监听器）；
 		// 路径经 mygo:file-drop 页面事件由前端 mygo-runtime 的 onFileDrop 接收。
 		win.OnFileDrop(func(*mygo.FileDropEvent) {})
+		// 记住窗口并让有未保存改动时的关闭先问过页面（见 close.go）。
+		guardWindow(win)
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

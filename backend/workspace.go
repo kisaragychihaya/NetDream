@@ -19,6 +19,7 @@ const bandVersion = 1
 // What a .band archive holds.
 const (
 	bandMetaEntry   = "workspace.json"
+	bandVarsEntry   = "engine/vars.json"
 	bandRequestsDir = "requests/"
 	bandExt         = ".band"
 )
@@ -102,6 +103,18 @@ func (WorkspaceService) SaveAs(data WorkspaceData) (string, error) {
 	return path, nil
 }
 
+// SetDirty tells the window whether the workspace holds unsaved changes: while
+// it does, closing the window asks the page before going ahead.
+func (WorkspaceService) SetDirty(dirty bool) {
+	guard.setDirty(dirty)
+}
+
+// CloseWindow closes the window even though the workspace may hold unsaved
+// changes, once the page's user chose to discard them.
+func (WorkspaceService) CloseWindow() {
+	guard.close()
+}
+
 // readBand reads the workspace an archive holds.
 func readBand(path string) (WorkspaceData, error) {
 	body, err := os.ReadFile(path)
@@ -121,6 +134,7 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 	var (
 		meta    bandMeta
 		hasMeta bool
+		vars    map[string]string
 	)
 	requests := make([]SavedRequest, 0, len(zr.File))
 	for _, entry := range zr.File {
@@ -134,6 +148,18 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 				return WorkspaceData{}, fmt.Errorf("%s is not a NetDream workspace: %w", name, err)
 			}
 			hasMeta = true
+		case entry.Name == bandVarsEntry:
+			// A vars.json that does not parse leaves the workspace with no
+			// variables, like an unreadable request is skipped.
+			entryBody, err := readZipEntry(entry)
+			if err != nil {
+				continue
+			}
+			var stored map[string]string
+			if err := json.Unmarshal(entryBody, &stored); err != nil {
+				continue
+			}
+			vars = stored
 		case isRequestEntry(entry.Name):
 			entryBody, err := readZipEntry(entry)
 			if err != nil {
@@ -153,7 +179,10 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 	if meta.Version != bandVersion {
 		return WorkspaceData{}, fmt.Errorf("%s is a workspace of version %d, but only version %d is supported", name, meta.Version, bandVersion)
 	}
-	return WorkspaceData{Name: meta.Name, Requests: requests}, nil
+	if vars == nil {
+		vars = map[string]string{} // the page reads a map where it expects one and never null
+	}
+	return WorkspaceData{Name: meta.Name, Requests: requests, Vars: vars}, nil
 }
 
 // writeBand writes data to path as a .band archive, replacing what is there
@@ -167,6 +196,20 @@ func writeBand(path string, data WorkspaceData) error {
 		return fmt.Errorf("encoding the workspace failed: %w", err)
 	}
 	if err := addZipEntry(zw, bandMetaEntry, meta); err != nil {
+		return err
+	}
+
+	// Written every time, empty or not: an older archive's variables would
+	// otherwise stay behind after the page cleared them.
+	vars := data.Vars
+	if vars == nil {
+		vars = map[string]string{}
+	}
+	varsBody, err := json.MarshalIndent(vars, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding the workspace variables failed: %w", err)
+	}
+	if err := addZipEntry(zw, bandVarsEntry, varsBody); err != nil {
 		return err
 	}
 

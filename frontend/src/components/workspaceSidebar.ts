@@ -17,6 +17,8 @@ export interface WorkspaceHandlers {
   open: () => void;
   save: () => void;
   saveAs: () => void;
+  /** 新建一个空工作区（脏时会先走未保存守卫）。 */
+  newWorkspace: () => void;
   newRequest: (kind: RequestKind) => void;
   load: (id: string) => void;
   remove: (id: string) => void;
@@ -303,15 +305,18 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
     const actions = document.createElement("div");
     actions.className = "ws-actions";
-    for (const [label, run] of [
-      ["打开", handlers.open],
-      ["保存", handlers.save],
-      ["另存为", handlers.saveAs],
+    // 四个按钮挤在 240px 的侧栏里：文案一律两字，全名放 title。
+    for (const [label, hint, run] of [
+      ["打开", "打开 .band 工作区", handlers.open],
+      ["保存", "保存到当前 .band 文件", handlers.save],
+      ["另存", "另存为新的 .band 文件", handlers.saveAs],
+      ["新建", "新建工作区", handlers.newWorkspace],
     ] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ws-btn";
       button.textContent = label;
+      button.title = hint;
       button.addEventListener("click", () => run());
       actions.append(button);
     }
@@ -321,7 +326,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     const createButton = document.createElement("button");
     createButton.type = "button";
     createButton.className = "ws-new";
-    createButton.textContent = "＋ 新建";
+    createButton.textContent = "＋ 新建请求";
     createButton.setAttribute("aria-haspopup", "menu");
     createButton.setAttribute("aria-expanded", "false");
 
@@ -360,7 +365,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     if (state.entries.length === 0) {
       const empty = document.createElement("p");
       empty.className = "ws-empty";
-      empty.textContent = "打开 .band 工作区，或点「＋ 新建」开始";
+      empty.textContent = "打开 .band 工作区，或点「＋ 新建请求」开始";
       panel.append(empty);
     } else {
       const list = document.createElement("div");

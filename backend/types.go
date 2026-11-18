@@ -192,8 +192,9 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 }
 
 type WorkspaceData struct {
-	Name     string         `json:"name"`
-	Requests []SavedRequest `json:"requests"`
+	Name     string            `json:"name"`
+	Requests []SavedRequest    `json:"requests"`
+	Vars     map[string]string `json:"vars"` // 脚本变量；读写为 zip 内独立 vars.json
 }
 
 type WorkspaceFile struct {
