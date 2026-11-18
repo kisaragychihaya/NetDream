@@ -8,6 +8,8 @@ import type {
   KeyValue,
   SavedMessage,
   SavedRequest,
+  ScriptLog,
+  ScriptTest,
   SSEEvent,
   SSEMessage,
   SSEOpen,
@@ -15,6 +17,7 @@ import type {
 } from "./mygo";
 
 export const STORAGE_KEY = "netdream.request";
+export const VARS_STORAGE_KEY = "netdream.vars";
 const SAVE_DELAY_MS = 300;
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
@@ -77,6 +80,10 @@ export interface RequestState {
   messages: SavedMessage[];
   /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔。 */
   socketProtocol: string;
+  /** 预执行脚本；空 = 不执行。 */
+  preScript: string;
+  /** 后执行脚本；空 = 不执行。 */
+  postScript: string;
 }
 
 export interface ResponseState {
@@ -88,6 +95,11 @@ export interface ResponseState {
   response: APIResponse | null;
   error: string | null;
   results: AssertionResult[];
+  /** 脚本产物（不持久化）。 */
+  scriptLogs: ScriptLog[];
+  scriptTests: ScriptTest[];
+  preScriptError: string | null;
+  postScriptError: string | null;
 }
 
 export interface WorkspaceState {
@@ -126,6 +138,8 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     assertions: [],
     messages: [],
     socketProtocol: "",
+    preScript: "",
+    postScript: "",
   };
 }
 
@@ -140,6 +154,10 @@ const runtime: ResponseState = {
   response: null,
   error: null,
   results: [],
+  scriptLogs: [],
+  scriptTests: [],
+  preScriptError: null,
+  postScriptError: null,
 };
 
 type Listener = () => void;
@@ -214,6 +232,74 @@ function save(): void {
   } catch {
     // Storage can be disabled or full; the page keeps working without it.
   }
+}
+
+/* ---- 变量（应用级，独立于单个请求） ---- */
+
+let vars: Record<string, string> = {};
+const varsListeners = new Set<Listener>();
+
+export function getVars(): Record<string, string> {
+  return vars;
+}
+
+export function setVars(next: Record<string, string>): void {
+  vars = { ...next };
+  scheduleVarsSave();
+  for (const listener of varsListeners) listener();
+}
+
+export function updateVars(mutate: (next: Record<string, string>) => void): void {
+  const next = { ...vars };
+  mutate(next);
+  setVars(next);
+}
+
+export function subscribeVars(listener: Listener): () => void {
+  varsListeners.add(listener);
+  return () => {
+    varsListeners.delete(listener);
+  };
+}
+
+let varsSaveTimer: number | undefined;
+
+function scheduleVarsSave(): void {
+  if (varsSaveTimer !== undefined) window.clearTimeout(varsSaveTimer);
+  varsSaveTimer = window.setTimeout(() => {
+    varsSaveTimer = undefined;
+    saveVars();
+  }, SAVE_DELAY_MS);
+}
+
+function saveVars(): void {
+  try {
+    localStorage.setItem(VARS_STORAGE_KEY, JSON.stringify(vars));
+  } catch {
+    // 同 request：存不下也不影响页面工作。
+  }
+}
+
+export function loadVars(): void {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(VARS_STORAGE_KEY);
+  } catch {
+    raw = null;
+  }
+  if (!raw) return;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (!isRecord(parsed)) return;
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value === "string") next[key] = value;
+  }
+  setVars(next);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -329,6 +415,8 @@ function hydrate(source: Record<string, unknown>): RequestState {
     assertions: hydrateAssertions(source.assertions),
     messages: hydrateMessages(source.messages),
     socketProtocol: text(source.socketProtocol),
+    preScript: text(source.preScript),
+    postScript: text(source.postScript),
   };
 }
 
@@ -436,6 +524,9 @@ export function buildRequest(): APIRequest {
     cookies: wireValues(state.cookies),
     timeout: state.timeout,
     http2: state.http2,
+    preScript: state.preScript,
+    postScript: state.postScript,
+    vars: { ...vars },
   };
 }
 
@@ -498,6 +589,8 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     })),
     messages: hydrateMessages(saved.messages),
     socketProtocol: text(saved.socketProtocol),
+    preScript: text(saved.preScript),
+    postScript: text(saved.postScript),
   };
 }
 
@@ -648,12 +741,20 @@ export function snapshotCurrent(): SavedRequest {
     })),
     messages: state.messages.map((message) => ({ ...message })),
     socketProtocol: state.socketProtocol,
+    preScript: state.preScript,
+    postScript: state.postScript,
   };
 }
 
 window.addEventListener("beforeunload", () => {
-  if (saveTimer === undefined) return;
-  window.clearTimeout(saveTimer);
-  saveTimer = undefined;
-  save();
+  if (saveTimer !== undefined) {
+    window.clearTimeout(saveTimer);
+    saveTimer = undefined;
+    save();
+  }
+  if (varsSaveTimer !== undefined) {
+    window.clearTimeout(varsSaveTimer);
+    varsSaveTimer = undefined;
+    saveVars();
+  }
 });

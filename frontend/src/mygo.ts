@@ -24,6 +24,12 @@ export interface APIRequest {
   timeout: number;
   /** h2c：对 http:// 明文强制 HTTP/2（https 始终自动协商，忽略此项） */
   http2: boolean;
+  /** 预执行脚本（JS，goja 运行）；空 = 不执行。在 {{var}} 替换与请求组装之前运行。 */
+  preScript: string;
+  /** 后执行脚本（JS，goja 运行）；空 = 不执行。拿到响应后运行。 */
+  postScript: string;
+  /** 变量快照：{{var}} 替换与脚本 nd.vars 的数据源；脚本写回后经 APIResponse.Vars 返回。 */
+  vars: Record<string, string>;
 }
 
 /** APIResponse is what Send hands back for one request. */
@@ -43,6 +49,19 @@ export interface APIResponse {
   sentHeaders: KeyValue[];
   /** text preview of the body, cut at 64KiB */
   sentBody: string;
+  /**
+   * 脚本产物：Vars 是脚本写回后的变量全量快照（无脚本时原样返回）；
+   * ScriptLogs/ScriptTests 按产生顺序合并前后脚本。
+   */
+  vars: Record<string, string>;
+  scriptLogs: ScriptLog[];
+  scriptTests: ScriptTest[];
+  /**
+   * 预脚本出错时非空（此时请求未发送，其余响应字段为零值）；
+   * 后脚本出错不影响已拿到的响应。
+   */
+  preScriptError: string;
+  postScriptError: string;
 }
 
 /** AuthInfo is the authentication a request carries. */
@@ -147,11 +166,33 @@ export interface SavedRequest {
   cookies: KeyValue[];
   timeout: number;
   http2: boolean;
+  /** 预执行脚本；空 = 无 */
+  preScript: string;
+  /** 后执行脚本；空 = 无 */
+  postScript: string;
   assertions: SavedAssertion[];
   /** 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求） */
   messages: SavedMessage[];
   /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用 */
   socketProtocol: string;
+}
+
+/** ScriptLog is one console.log/warn/error call from a pre/post script. */
+export interface ScriptLog {
+  /** "log" | "warn" | "error" */
+  level: string;
+  /** arguments serialized to JSON, joined with spaces */
+  text: string;
+  /** Unix 毫秒 */
+  at: number;
+}
+
+/** ScriptTest is one nd.test(name, fn) result from a pre/post script. */
+export interface ScriptTest {
+  name: string;
+  pass: boolean;
+  /** failure message; empty when passed */
+  error: string;
 }
 
 /** SocketConnectParams 发起一条 WebSocket（ws:// / wss://）或 TCP 连接。 */

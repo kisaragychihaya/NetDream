@@ -11,6 +11,7 @@ backend/
   types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send、PickFile（仅有的两个导出方法）
   request.go           # 未导出 helper：URL/Body 构造、头与 Cookie、响应整形、截断、h2c 传输
+  script.go            # 脚本引擎（goja）：预/后执行脚本 + {{var}} 替换，全部未导出
   sse.go               # SSE：Content-Type 判定、Open/Event 推送、事件流解析器
   socket.go            # SocketService：Connect/Send/Disconnect + 连接注册表 + WS/TCP 读写循环
   workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写
@@ -18,7 +19,8 @@ frontend/
   index.html           # 静态骨架（id 见下）
   src/
     main.ts            # 入口：装配各模块；按编辑器 kind 切换 HTTP / Socket 视图
-    state.ts           # 请求/响应/工作区状态 + localStorage 持久化 + 事件
+    monacoSetup.ts     # Monaco 装配：worker 注册 + nd API 补全库（extraLib）
+    state.ts           # 请求/响应/工作区/变量状态 + localStorage 持久化 + 事件
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
     assert.ts          # 断言规则模型 + runAssertions 纯函数
     components/
@@ -27,11 +29,12 @@ frontend/
       kvTable.ts       # 通用键值编辑器（启用/键/值/描述/删除/添加）
       bodyEditor.ts    # Body 类型单选 + 五种子编辑器
       authEditor.ts    # 认证（none/basic/bearer）
-      responseView.ts  # 响应区（选项卡 + 美化/原生/预览 + 头/Cookie/实际请求）
+      scriptEditor.ts  # Monaco 脚本编辑器（预/后执行脚本页，与 state 双向绑定）
+      responseView.ts  # 响应区（选项卡 + 美化/原生/预览 + 头/Cookie/实际请求/控制台）
       socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉
       socketPanel.ts   # Socket 响应区：实时响应日志（发送/接收）+ 握手响应头
       assertionsPanel.ts # 断言与校验侧栏
-      workspaceSidebar.ts # 工作区侧栏（打开/保存/另存为 + 新建类型菜单 + 请求列表）
+      workspaceSidebar.ts # 工作区侧栏（打开/保存/另存为 + 新建类型菜单 + 变量区 + 请求列表）
   src/mygo.ts          # `mygo generate` 生成，禁止手改
   style.css
 scripts/
@@ -84,6 +87,12 @@ type APIRequest struct {
 	Cookies    []KeyValue  `json:"cookies"`
 	Timeout    int         `json:"timeout"` // 秒；0 = 默认 30s
 	HTTP2      bool        `json:"http2"`   // h2c：对 http:// 明文强制 HTTP/2（https 始终自动协商，忽略此项）
+	// 预执行脚本（JS，goja 运行）；空 = 不执行。在 {{var}} 替换与请求组装之前运行。
+	PreScript string `json:"preScript"`
+	// 后执行脚本（JS，goja 运行）；空 = 不执行。拿到响应后运行。
+	PostScript string `json:"postScript"`
+	// 变量快照：{{var}} 替换与脚本 nd.vars 的数据源；脚本写回后经 APIResponse.Vars 返回。
+	Vars map[string]string `json:"vars"`
 }
 
 type ResponseCookie struct {
@@ -110,6 +119,29 @@ type APIResponse struct {
 	FinalURL    string     `json:"finalURL"`
 	SentHeaders []KeyValue `json:"sentHeaders"`
 	SentBody    string     `json:"sentBody"` // 发送体的文本预览（截断至 64KiB）
+	// 脚本产物：Vars 是脚本写回后的变量全量快照（无脚本时原样返回）；
+	// ScriptLogs/ScriptTests 按产生顺序合并前后脚本。
+	Vars        map[string]string `json:"vars"`
+	ScriptLogs  []ScriptLog       `json:"scriptLogs"`
+	ScriptTests []ScriptTest      `json:"scriptTests"`
+	// 预脚本出错时非空（此时请求未发送，其余响应字段为零值）；
+	// 后脚本出错不影响已拿到的响应。
+	PreScriptError  string `json:"preScriptError"`
+	PostScriptError string `json:"postScriptError"`
+}
+
+// ScriptLog 是脚本里 console.log/warn/error 的一条输出。
+type ScriptLog struct {
+	Level string `json:"level"` // "log" | "warn" | "error"
+	Text  string `json:"text"`  // 参数逐个 JSON 序列化后以空格拼接
+	At    int64  `json:"at"`    // Unix 毫秒
+}
+
+// ScriptTest 是 nd.test(name, fn) 的一条断言结果。
+type ScriptTest struct {
+	Name  string `json:"name"`
+	Pass  bool   `json:"pass"`
+	Error string `json:"error"` // 失败原因；通过为空
 }
 
 // SSE：流式响应（Content-Type: text/event-stream）。Send 先推一个 Open，
@@ -187,7 +219,24 @@ type SocketEvent struct {
     仅当用户未显式提供 Authorization 头时设置。
   - Cookies：把启用项拼成 `Cookie` 头（`k=v; k2=v2`）；用户显式 Cookie 头优先。
   - 响应头按 key 排序、同名合并为多行；响应体 ≤10MiB，超出 Truncated=true。
-  - 错误用 `fmt.Errorf("...: %w", err)` 包装后返回（前端会显示 message）。
+  - 错误用 `fmt.Errorf("...: %w", err)` 包装后返回（前端会显示 message）；
+    出错返回也携带 `Vars/ScriptLogs/ScriptTests`（生成的 TS 类型不可为 null）。
+  - 预执行脚本（PreScript 非空）：在 {{var}} 替换与请求组装之前经 goja（backend/script.go）执行。
+    出错则**不发送请求**，返回 `APIResponse{Vars, ScriptLogs, ScriptTests, PreScriptError}`
+    且 error 为 nil（前端按失败展示，不当普通响应）。
+  - `{{var}}` 替换：预脚本之后、组装之前生效，目标为 URL、Params/Headers/Cookies/
+    URLEncoded 各键值、FormData 值、Raw、Auth 三项；变量名 TrimSpace，未定义保留 `{{var}}` 原样。
+    无脚本但 Vars 非空时同样执行。
+  - 后执行脚本（PostScript 非空）：拿到响应后执行（SSE 在流正常结束后，Body 为空）；
+    出错只记 `PostScriptError`，已拿到的响应保留。
+  - 脚本 API（同步；单次 5s `vm.Interrupt` 超时 + 页面关闭取消）：
+    - `nd.vars`：get/set/unset/has/toObject（快照进、全量出，写回经 APIResponse.Vars）
+    - `nd.request`：`{method,url,headers,query,body}`；预脚本可写并回写 DTO
+      （headers/query 大小写不敏感 diff：消失或 null 删除、新写法覆盖；body 改了则
+      BodyType=raw、RawType 空补 text），后脚本为只读快照
+    - `nd.response`（仅后脚本）：`{status,statusText,headers,body,timeMS,sizeBytes}` + `json()`
+    - `nd.test(name, fn)`（fn 抛异常 = 失败，不中断脚本）、`nd.assert(cond, msg)`
+    - `console.log/warn/error(...)` → ScriptLogs（「控制台」页签）
 - `PickFile() (string, error)` — 原生打开文件对话框（`mygo.Dialog.Open`），
   用户取消时返回 `("", nil)`。
 
@@ -285,6 +334,8 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	Cookies    []KeyValue       `json:"cookies"`
 	Timeout    int              `json:"timeout"`
 	HTTP2      bool             `json:"http2"`
+	PreScript  string           `json:"preScript"`  // 预执行脚本；空 = 无
+	PostScript string           `json:"postScript"` // 后执行脚本；空 = 无
 	Assertions []SavedAssertion `json:"assertions"`
 	Messages   []SavedMessage   `json:"messages"`       // 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol string       `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
@@ -338,11 +389,17 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
 ### state.ts
 
 - `RequestState`：method/url/params/headers/pathParams/bodyType/formData/urlEncoded/raw/rawType/
-  binaryPath/auth/cookies/timeout/http2 + assertion 规则数组；**WS/TCP 追加**：
+  binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP 追加**：
   `kind: "http" | "websocket" | "tcp"`（默认 "http"）、`messages: SavedMessage[]`
   （已存消息模板）、`socketProtocol: string`（WS 子协议，设置页编辑）。
+- 变量 store（应用级，独立于单个请求）：`getVars/setVars/updateVars/subscribeVars/loadVars`，
+  localStorage 键 `netdream.vars`（同样 300ms 防抖）；`buildRequest()` 附带
+  `preScript/postScript/vars`；发送返回时 `response.vars` 写回 store（带脚本时无条件下发，
+  无脚本时后端原样返回故为空操作）。
+- `ResponseState` 追加脚本产物（不持久化）：`scriptLogs/scriptTests/preScriptError/postScriptError`。
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
-- 响应与断言结果**不**持久化；Socket 会话（日志/连接状态）也不持久化。
+- 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
+  Socket 会话（日志/连接状态）也不持久化。
 - `newRequest(kind)` 按类型重置编辑器；`snapshotCurrent()` 快照带 kind/messages，
   命名规则：HTTP `METHOD host/path`；WS `WS host/path`；TCP `TCP host:port`（截断 40 字符）。
 
@@ -384,8 +441,10 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     WS/TCP 隐藏方法下拉与 h2c，占位符 WS「请输入以 ws:// 或 wss:// 开头的地址」、
     TCP「请输入主机:端口，如 127.0.0.1:7000」；右侧按钮随会话状态在 连接/断开 间切换
     （connecting/open 显示 断开）。
-  - **请求页签集**：HTTP = 现有 8 页不变；WS = 发送消息 / 请求头 / 请求参数 / 设置
-    （设置 = 子协议输入框，映射 `socketProtocol`）；TCP = 发送消息。同样用 tabs.ts。
+  - **请求页签集**：HTTP = 现有 8 页（预执行脚本 / 后执行脚本页挂 Monaco 编辑器，
+    见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib）；
+    WS = 发送消息 / 请求头 / 请求参数 / 设置（设置 = 子协议输入框，映射 `socketProtocol`）；
+    TCP = 发送消息。同样用 tabs.ts。
   - **发送消息页**（socketComposer.ts）：左侧消息模板列表（点击载入编辑器、双击名称
     行内重命名、行尾 × 删除、「+ 新增」把当前编辑器内容存为模板并选中）；右侧编辑器 =
     名称 + 类型下拉（Text/JSON/XML/HTML/Binary，映射 `SavedMessage.msgType`）+
@@ -401,16 +460,22 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   handler 收到 `open` 切到流式视图（展示状态/协议/响应头），收到 `event` 追加事件行；
   点击「停止」调 `channel.close()`（Go 侧 ctx 取消、请求中断），用户主动停止时
   吞掉 Send 返回的取消错误。SSE 视图 = 事件表格（N/ID/事件名/Data）+ 自动滚底 + 停止按钮。
+  返回后：`response.vars` 写回变量 store（带脚本时无条件下发后端快照）；
+  `preScriptError` 非空按失败展示（错误条「预执行脚本出错」，response 置空）；
+  脚本日志/测试/错误随响应落 ResponseState。
 - URL 栏右侧一个「h2c」小复选框（强制 HTTP/2 明文），映射 `APIRequest.http2`。
 - 响应工具栏在状态徽章旁显示协议版本（`response.proto`，如 HTTP/2.0）。
 - Body 类型单选：none / form-data / urlencoded / binary / raw；raw 选中时出现子类型
   下拉（JSON/Text/XML/HTML）。
-- 响应区选项卡：实时响应 / 响应头(n) / Cookie / 实际请求（n 为数量）；
-  「响应示例」「控制台」渲染为占位灰字「即将支持」。
+- 响应区选项卡：实时响应 / 响应头(n) / Cookie / 实际请求 / 控制台（n 为数量）；
+  「响应示例」渲染为占位灰字「即将支持」。控制台页 = 脚本 console 输出
+  （时间 + 级别徽标 log 灰/warn 橙/error 红 + 等宽文本）与两条脚本错误行，
+  空态「暂无日志」。
 - 实时响应工具栏：美化 | 原生 | 预览（iframe `sandbox=allow-scripts` srcdoc，注入 `<base href=请求URL>`，相对资源可加载）、复制按钮；
   美化 = JSON 可解析时 pretty+高亮；否则识别 HTML 时格式化缩进+标签/属性/注释高亮；再否则转义文本；状态徽章按时态着色（2xx 绿/3xx 蓝/4xx 橙/5xx 红）。
 - 断言面板：开关折叠；规则列表（启用框、类型下拉、期望值输入、删除）；
-  发送后逐条显示 ✓ 绿 / ✗ 红 + actual 值。
+  发送后逐条显示 ✓ 绿 / ✗ 红 + actual 值。规则下方「脚本测试 n / m」分组
+  （有 scriptTests 时才显示）：✓/✗ + 名称，失败附 error 文本。
 
 ### 工作区（前端）
 
@@ -441,7 +506,8 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   `<div id="main-area">`（**原有 id 一律不动**，组件无感）。
   侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存为」；
   「＋ 新建」改为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接，选中调
-  `newRequest(kind)`）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
+  `newRequest(kind)`）；可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
+  脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
   WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。
@@ -455,7 +521,8 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 
 ### 约定
 
-- 原生 TS + strict（`noUncheckedIndexedAccess`），不引入任何 npm 依赖。
+- 原生 TS + strict（`noUncheckedIndexedAccess`），不引入任何 npm 依赖
+  （唯一例外：`monaco-editor`，预/后执行脚本编辑器，用户明确批准）。
 - 中文 UI 文案；样式按 ApiPost 截图：浅底、圆角卡片、蓝色主色 `#3b82f6`。
 - 生成文件 `src/mygo.ts` 只能通过 `bun run generate` 更新。
 

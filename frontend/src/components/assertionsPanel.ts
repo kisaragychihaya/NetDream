@@ -5,6 +5,7 @@ import {
   type AssertionResult,
   type AssertionRule,
 } from "../assert";
+import type { ScriptTest } from "../mygo";
 import { getRequest, getResponse, subscribe, updateRequest, updateResponse } from "../state";
 
 export function mountAssertionsPanel(host: HTMLElement): () => void {
@@ -39,10 +40,14 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
   addButton.className = "add-row";
   addButton.textContent = "+ 添加断言";
 
+  const testsHost = document.createElement("div");
+  testsHost.className = "script-tests";
+  testsHost.hidden = true;
+
   const summary = document.createElement("div");
   summary.className = "assert-summary";
 
-  body.append(rulesHost, addButton, summary);
+  body.append(rulesHost, addButton, testsHost, summary);
   host.append(header, body);
 
   const commitRules = (): void => {
@@ -186,6 +191,49 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     }
   }
 
+  function renderScriptTests(): void {
+    const tests = getResponse().scriptTests;
+    testsHost.textContent = "";
+    testsHost.hidden = tests.length === 0;
+    if (tests.length === 0) return;
+
+    const title = document.createElement("div");
+    title.className = "script-tests-title";
+    const passed = tests.filter((test) => test.pass).length;
+    title.textContent = `脚本测试 ${passed} / ${tests.length}`;
+    testsHost.append(title);
+
+    for (const test of tests) testsHost.append(scriptTestRow(test));
+  }
+
+  function scriptTestRow(test: ScriptTest): HTMLElement {
+    const row = document.createElement("div");
+    row.className = test.pass ? "script-test pass" : "script-test fail";
+
+    const head = document.createElement("div");
+    head.className = "script-test-head";
+
+    const mark = document.createElement("span");
+    mark.className = "assert-mark";
+    mark.textContent = test.pass ? "✓" : "✗";
+
+    const name = document.createElement("span");
+    name.className = "script-test-name";
+    name.textContent = test.name;
+
+    head.append(mark, name);
+    row.append(head);
+
+    if (!test.pass && test.error !== "") {
+      const error = document.createElement("div");
+      error.className = "script-test-error";
+      error.textContent = test.error;
+      row.append(error);
+    }
+
+    return row;
+  }
+
   addButton.addEventListener("click", () => {
     const rule = createAssertionRule();
     updateRequest((state) => {
@@ -202,11 +250,13 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
 
   renderRules();
   renderResults();
+  renderScriptTests();
 
   const unsubscribe = subscribe(() => {
     // loadEntry replaces the rules array: the loaded request's rules must show.
     if (getRequest().assertions !== renderedRules) renderRules();
     renderResults();
+    renderScriptTests();
   });
 
   return () => {

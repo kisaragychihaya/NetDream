@@ -1,4 +1,4 @@
-import type { APIResponse, SSEEvent, SSEOpen } from "../mygo";
+import type { APIResponse, ScriptLog, ScriptTest, SSEEvent, SSEOpen } from "../mygo";
 import { getResponse, stopStream, subscribe, type ResponseState } from "../state";
 import { createTabs, type TabDef, type TabsHandle } from "./tabs";
 
@@ -38,6 +38,10 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
   let lastOpen: SSEOpen | null = null;
   let lastStopped = false;
   let lastEventsCount = 0;
+  let lastScriptLogs: readonly ScriptLog[] = getResponse().scriptLogs;
+  let lastScriptTests: readonly ScriptTest[] = getResponse().scriptTests;
+  let lastPreScriptError: string | null = getResponse().preScriptError;
+  let lastPostScriptError: string | null = getResponse().postScriptError;
   let streamRefs: StreamRefs | null = null;
 
   const tabDefs = (state: ResponseState): TabDef[] => {
@@ -76,9 +80,47 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
         return cookiesTab(state.response);
       case "actual":
         return actualTab(state.response);
+      case "console":
+        return consoleTab(state);
       default:
         return placeholderTab();
     }
+  }
+
+  // 控制台 = 前后脚本的 console.* 输出 + 两条脚本错误行。
+  function consoleTab(state: ResponseState): HTMLElement {
+    const root = resTabRoot();
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "res-toolbar";
+    toolbar.append(metaText(`日志 ${state.scriptLogs.length} 条`));
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    toolbar.append(spacer);
+    root.append(toolbar);
+
+    const scroll = document.createElement("div");
+    scroll.className = "res-scroll console-scroll";
+
+    const lines: HTMLElement[] = [];
+    if (state.preScriptError !== null) {
+      lines.push(consoleLine("error", null, `预执行脚本错误：${state.preScriptError}`));
+    }
+    for (const log of state.scriptLogs) {
+      lines.push(consoleLine(scriptLevel(log.level), log.at, log.text));
+    }
+    if (state.postScriptError !== null) {
+      lines.push(consoleLine("error", null, `后执行脚本错误：${state.postScriptError}`));
+    }
+
+    if (lines.length === 0) {
+      scroll.append(emptyState("暂无日志"));
+    } else {
+      for (const line of lines) scroll.append(line);
+    }
+
+    root.append(scroll);
+    return root;
   }
 
   function bodyTab(state: ResponseState): HTMLElement {
@@ -397,6 +439,10 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const streamingChanged = next.streaming !== lastStreaming;
     const stoppedChanged = next.stopped !== lastStopped;
     const eventsChanged = next.events.length !== lastEventsCount;
+    const logsChanged = next.scriptLogs !== lastScriptLogs;
+    const testsChanged = next.scriptTests !== lastScriptTests;
+    const scriptErrorChanged =
+      next.preScriptError !== lastPreScriptError || next.postScriptError !== lastPostScriptError;
 
     lastResponse = next.response;
     lastOpen = next.open;
@@ -405,15 +451,37 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     lastStreaming = next.streaming;
     lastStopped = next.stopped;
     lastEventsCount = next.events.length;
+    lastScriptLogs = next.scriptLogs;
+    lastScriptTests = next.scriptTests;
+    lastPreScriptError = next.preScriptError;
+    lastPostScriptError = next.postScriptError;
 
-    if (!responseChanged && !openChanged && !errorChanged && !sendingChanged && !streamingChanged && !stoppedChanged && !eventsChanged) {
+    if (
+      !responseChanged &&
+      !openChanged &&
+      !errorChanged &&
+      !sendingChanged &&
+      !streamingChanged &&
+      !stoppedChanged &&
+      !eventsChanged &&
+      !logsChanged &&
+      !testsChanged &&
+      !scriptErrorChanged
+    ) {
       return;
     }
 
     if (responseChanged || openChanged) tabs.setTabs(tabDefs(next));
 
     const structural =
-      responseChanged || openChanged || errorChanged || sendingChanged || streamingChanged || stoppedChanged;
+      responseChanged ||
+      openChanged ||
+      errorChanged ||
+      sendingChanged ||
+      streamingChanged ||
+      stoppedChanged ||
+      logsChanged ||
+      scriptErrorChanged;
     if (!structural) {
       if (active !== "body") return;
       if (streamRefs !== null) appendStreamEvents();
@@ -453,6 +521,48 @@ function placeholderTab(): HTMLElement {
   box.textContent = "即将支持";
   root.append(box);
   return root;
+}
+
+type ScriptLevel = "log" | "warn" | "error";
+
+function scriptLevel(value: string): ScriptLevel {
+  return value === "warn" || value === "error" ? value : "log";
+}
+
+const LEVEL_LABELS: Record<ScriptLevel, string> = {
+  log: "日志",
+  warn: "警告",
+  error: "错误",
+};
+
+function pad(value: number, width = 2): string {
+  return String(value).padStart(width, "0");
+}
+
+// 脚本日志的时间戳按本地时钟显示到毫秒。
+function formatClock(at: number): string {
+  const date = new Date(at);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+}
+
+function consoleLine(level: ScriptLevel, at: number | null, text: string): HTMLElement {
+  const line = document.createElement("div");
+  line.className = `console-line ${level}`;
+
+  const time = document.createElement("span");
+  time.className = "console-time";
+  time.textContent = at === null ? "—" : formatClock(at);
+
+  const badge = document.createElement("span");
+  badge.className = `console-level ${level}`;
+  badge.textContent = LEVEL_LABELS[level];
+
+  const body = document.createElement("pre");
+  body.className = "console-text";
+  body.textContent = text;
+
+  line.append(time, badge, body);
+  return line;
 }
 
 function metaText(text: string): HTMLElement {

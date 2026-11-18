@@ -715,16 +715,6 @@ button:disabled {
   height: 28px;
 }
 
-.script-area {
-  width: 100%;
-  min-height: 170px;
-  border-radius: 8px;
-  background: var(--bg);
-  font-family: var(--mono);
-  font-size: 12px;
-  resize: vertical;
-}
-
 /* ---- 响应区 ---- */
 
 #response-pane {
@@ -1785,4 +1775,192 @@ button:disabled {
   height: 1px;
   padding: 0;
   opacity: 0;
+}
+
+/* ---- 脚本编辑器（预执行 / 后执行） ---- */
+
+.script-editor {
+  height: 300px;
+  min-height: 180px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* ---- 控制台（脚本日志） ---- */
+
+.console-scroll {
+  padding: 4px 14px 12px;
+}
+
+.console-line {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.console-line:last-child {
+  border-bottom: none;
+}
+
+.console-time {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.console-level {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.console-level.warn {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.console-level.error {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.console-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.console-line.error .console-text {
+  color: var(--red);
+}
+
+/* ---- 脚本测试（断言面板） ---- */
+
+.script-tests {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.script-tests[hidden] {
+  display: none;
+}
+
+.script-tests-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.script-test {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.script-test-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.script-test.pass .assert-mark {
+  color: var(--green);
+}
+
+.script-test.fail .assert-mark {
+  color: var(--red);
+}
+
+.script-test-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.script-test-error {
+  padding-left: 12px;
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 变量区（工作区侧栏） ---- */
+
+.ws-vars {
+  flex: none;
+  margin: 0 8px 4px;
+  padding-top: 2px;
+  border-top: 1px solid var(--border);
+}
+
+.ws-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 28px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.ws-section:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.ws-section[aria-expanded="false"] .chevron {
+  transform: rotate(-90deg);
+}
+
+.ws-vars-body {
+  max-height: 220px;
+  padding: 2px 2px 4px;
+  overflow: auto;
+}
+
+.ws-vars-body[hidden] {
+  display: none;
+}
+
+.kv-table.no-description .kv-head,
+.kv-table.no-description .kv-row {
+  grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr) 28px;
+}
+
+.kv-table.no-enabled .kv-head,
+.kv-table.no-enabled .kv-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 28px;
+}
+
+.kv-table.no-enabled.no-description .kv-head,
+.kv-table.no-enabled.no-description .kv-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 24px;
 }

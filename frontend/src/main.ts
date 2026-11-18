@@ -5,6 +5,7 @@ import { mountAuthEditor } from "./components/authEditor";
 import { mountBodyEditor } from "./components/bodyEditor";
 import { mountKVTable } from "./components/kvTable";
 import { mountResponseView } from "./components/responseView";
+import { mountScriptEditor } from "./components/scriptEditor";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
 import { mountSocketPanel } from "./components/socketPanel";
 import { createTabs, type TabDef } from "./components/tabs";
@@ -28,15 +29,18 @@ import {
   getWorkspace,
   loadEntry,
   loadSavedRequest,
+  loadVars,
   loadWorkspace,
   newRequest,
   pushStreamEvent,
   renameEntry,
   renameWorkspace,
   setStreamChannel,
+  setVars,
   setWorkspacePath,
   snapshotCurrent,
   subscribe,
+  updateRequest,
   updateResponse,
   upsertEntry,
   type RequestKind,
@@ -151,18 +155,45 @@ async function send(): Promise<void> {
     events: [],
     error: null,
     results: [],
+    scriptLogs: [],
+    scriptTests: [],
+    preScriptError: null,
+    postScriptError: null,
   });
 
   try {
     const response = await RequestService.send(request, channel);
     setStreamChannel(null);
-    updateResponse({
-      sending: false,
-      streaming: false,
-      response,
-      error: null,
-      results: runAssertions(getRequest().assertions, response),
-    });
+    // 脚本写回的变量覆盖界面的变量表。后端保证无脚本时原样返回快照，
+    // 所以带脚本时无条件下发——脚本删掉全部变量时空对象也要生效。
+    const hadScripts = request.preScript !== "" || request.postScript !== "";
+    if (hadScripts || Object.keys(response.vars).length > 0) setVars(response.vars);
+    const script = {
+      scriptLogs: response.scriptLogs,
+      scriptTests: response.scriptTests,
+      preScriptError: response.preScriptError === "" ? null : response.preScriptError,
+      postScriptError: response.postScriptError === "" ? null : response.postScriptError,
+    };
+    if (response.preScriptError !== "") {
+      // 预脚本出错时请求没有发出：按失败展示，不当成普通响应。
+      updateResponse({
+        sending: false,
+        streaming: false,
+        response: null,
+        error: `预执行脚本出错：${response.preScriptError}`,
+        results: [],
+        ...script,
+      });
+    } else {
+      updateResponse({
+        sending: false,
+        streaming: false,
+        response,
+        error: null,
+        results: runAssertions(getRequest().assertions, response),
+        ...script,
+      });
+    }
   } catch (error) {
     setStreamChannel(null);
     const stopped = getResponse().stopped;
@@ -243,21 +274,8 @@ async function saveWorkspace(forceSaveAs: boolean): Promise<void> {
   }
 }
 
-function mountScriptPlaceholder(host: HTMLElement, placeholder: string): void {
-  const area = document.createElement("textarea");
-  area.className = "script-area";
-  area.readOnly = true;
-  area.spellcheck = false;
-  area.placeholder = placeholder;
-
-  const note = document.createElement("p");
-  note.className = "hint";
-  note.textContent = "脚本执行将在后续版本提供";
-
-  host.append(area, note);
-}
-
 loadSavedRequest();
+loadVars();
 
 mountUrlBar(topbar, {
   send: () => void send(),
@@ -267,22 +285,30 @@ mountUrlBar(topbar, {
 
 mountKVTable(viewOf("headers"), {
   rows: () => getRequest().headers,
-  append: (state) => {
-    state.headers = [...state.headers, emptyRow()];
+  append: () => {
+    updateRequest((state) => {
+      state.headers = [...state.headers, emptyRow()];
+    });
   },
-  remove: (state, index) => {
-    state.headers = state.headers.filter((_, position) => position !== index);
+  remove: (index) => {
+    updateRequest((state) => {
+      state.headers = state.headers.filter((_, position) => position !== index);
+    });
   },
   addLabel: "+ 添加请求头",
 });
 
 mountKVTable(viewOf("query"), {
   rows: () => getRequest().params,
-  append: (state) => {
-    state.params = [...state.params, emptyRow()];
+  append: () => {
+    updateRequest((state) => {
+      state.params = [...state.params, emptyRow()];
+    });
   },
-  remove: (state, index) => {
-    state.params = state.params.filter((_, position) => position !== index);
+  remove: (index) => {
+    updateRequest((state) => {
+      state.params = state.params.filter((_, position) => position !== index);
+    });
   },
   addLabel: "+ 添加参数",
   hint: "启用的参数会拼接到 URL 的查询字符串中。",
@@ -290,11 +316,15 @@ mountKVTable(viewOf("query"), {
 
 mountKVTable(viewOf("path"), {
   rows: () => getRequest().pathParams,
-  append: (state) => {
-    state.pathParams = [...state.pathParams, emptyRow()];
+  append: () => {
+    updateRequest((state) => {
+      state.pathParams = [...state.pathParams, emptyRow()];
+    });
   },
-  remove: (state, index) => {
-    state.pathParams = state.pathParams.filter((_, position) => position !== index);
+  remove: (index) => {
+    updateRequest((state) => {
+      state.pathParams = state.pathParams.filter((_, position) => position !== index);
+    });
   },
   addLabel: "+ 添加 Path 参数",
   hint: "URL 中的 {占位符} 会自动生成行，发送前替换为编码后的值。",
@@ -307,17 +337,40 @@ mountSocketSettings(viewOf("settings"));
 
 mountKVTable(viewOf("cookies"), {
   rows: () => getRequest().cookies,
-  append: (state) => {
-    state.cookies = [...state.cookies, emptyRow()];
+  append: () => {
+    updateRequest((state) => {
+      state.cookies = [...state.cookies, emptyRow()];
+    });
   },
-  remove: (state, index) => {
-    state.cookies = state.cookies.filter((_, position) => position !== index);
+  remove: (index) => {
+    updateRequest((state) => {
+      state.cookies = state.cookies.filter((_, position) => position !== index);
+    });
   },
   addLabel: "+ 添加 Cookie",
 });
 
-mountScriptPlaceholder(viewOf("pre"), "// 预执行脚本：在发送请求前运行");
-mountScriptPlaceholder(viewOf("post"), "// 后执行脚本：在收到响应后运行");
+mountScriptEditor(
+  viewOf("pre"),
+  () => getRequest().preScript,
+  (value) => {
+    updateRequest((state) => {
+      state.preScript = value;
+    });
+  },
+  subscribe,
+);
+
+mountScriptEditor(
+  viewOf("post"),
+  () => getRequest().postScript,
+  (value) => {
+    updateRequest((state) => {
+      state.postScript = value;
+    });
+  },
+  subscribe,
+);
 
 let currentKind: RequestKind = getRequest().kind;
 let currentRequest = getRequest();

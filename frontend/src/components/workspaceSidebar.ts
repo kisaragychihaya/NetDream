@@ -1,5 +1,17 @@
-import { METHODS, getWorkspace, subscribe, type Method, type RequestKind } from "../state";
+import {
+  METHODS,
+  emptyRow,
+  getVars,
+  getWorkspace,
+  setVars,
+  subscribe,
+  subscribeVars,
+  type KVRow,
+  type Method,
+  type RequestKind,
+} from "../state";
 import type { SavedRequest } from "../mygo";
+import { mountKVTable } from "./kvTable";
 
 export interface WorkspaceHandlers {
   open: () => void;
@@ -60,6 +72,104 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
   let lastStructure = "";
   let lastCurrent: string | null = null;
   let menuRoot: HTMLElement | null = null;
+  let varsCollapsed = false;
+  let disposeVars: (() => void) | null = null;
+
+  const rowsFromVars = (source: Record<string, string>): KVRow[] =>
+    Object.entries(source).map(([key, value]) => ({
+      key,
+      value,
+      description: "",
+      enabled: true,
+    }));
+
+  const recordFromRows = (rows: readonly KVRow[]): Record<string, string> => {
+    const next: Record<string, string> = {};
+    for (const row of rows) {
+      const key = row.key.trim();
+      if (key === "") continue;
+      next[key] = row.value;
+    }
+    return next;
+  };
+
+  const sameRecord = (left: Record<string, string>, right: Record<string, string>): boolean => {
+    const keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    return keys.every((key) => left[key] === right[key]);
+  };
+
+  // 变量表：kvTable 编辑的是行数组，提交时折叠成 Record 写进 vars store；
+  // 脚本写回的变量（setVars）会让行数组换一份，表格随之重建。
+  const mountVarsEditor = (host: HTMLElement): () => void => {
+    let rows = rowsFromVars(getVars());
+
+    const commit = (): void => setVars(recordFromRows(rows));
+
+    const apply = (): void => {
+      const incoming = getVars();
+      // 本表自己写入的记录与 rows 一致：不重建，避免打断正在输入的单元格。
+      if (sameRecord(incoming, recordFromRows(rows))) return;
+      rows = rowsFromVars(incoming);
+    };
+
+    const unsubscribe = subscribeVars(apply);
+
+    const disposeTable = mountKVTable(host, {
+      rows: () => rows,
+      append: () => {
+        rows = [...rows, emptyRow()];
+        commit();
+      },
+      remove: (index) => {
+        rows = rows.filter((_, position) => position !== index);
+        commit();
+      },
+      addLabel: "+ 添加变量",
+      withEnabled: false,
+      withDescription: false,
+      hint: "{{变量名}} 在发送前替换为这里的值，脚本可用 nd.vars 读写。",
+      commit,
+      subscribe: subscribeVars,
+    });
+
+    return () => {
+      unsubscribe();
+      disposeTable();
+    };
+  };
+
+  const varsSection = (): HTMLElement => {
+    const section = document.createElement("div");
+    section.className = "ws-vars";
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "ws-section";
+    header.setAttribute("aria-expanded", varsCollapsed ? "false" : "true");
+    const label = document.createElement("span");
+    label.textContent = "变量";
+    const chevron = document.createElement("span");
+    chevron.className = "chevron";
+    chevron.textContent = "▾";
+    header.append(label, chevron);
+
+    const body = document.createElement("div");
+    body.className = "ws-vars-body";
+    body.hidden = varsCollapsed;
+
+    header.addEventListener("click", () => {
+      varsCollapsed = !varsCollapsed;
+      body.hidden = varsCollapsed;
+      header.setAttribute("aria-expanded", varsCollapsed ? "false" : "true");
+    });
+
+    disposeVars?.();
+    disposeVars = mountVarsEditor(body);
+
+    section.append(header, body);
+    return section;
+  };
 
   const closeMenu = (): void => {
     const menu = menuRoot?.querySelector<HTMLElement>(".ws-new-menu");
@@ -245,7 +355,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     create.append(createButton, menu);
     menuRoot = create;
 
-    panel.append(title, actions, create);
+    panel.append(title, actions, create, varsSection());
 
     if (state.entries.length === 0) {
       const empty = document.createElement("p");
@@ -304,6 +414,8 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     unsubscribe();
     document.removeEventListener("click", onDocumentClick);
     document.removeEventListener("keydown", onDocumentKey);
+    disposeVars?.();
+    disposeVars = null;
     host.textContent = "";
   };
 }

@@ -91,11 +91,15 @@ export function mountBodyEditor(host: HTMLElement): () => void {
       case "formData": {
         disposeChild = mountKVTable(panel, {
           rows: () => getRequest().formData,
-          append: (value) => {
-            value.formData = [...value.formData, emptyFormRow()];
+          append: () => {
+            updateRequest((value) => {
+              value.formData = [...value.formData, emptyFormRow()];
+            });
           },
-          remove: (value, index) => {
-            value.formData = value.formData.filter((_, position) => position !== index);
+          remove: (index) => {
+            updateRequest((value) => {
+              value.formData = value.formData.filter((_, position) => position !== index);
+            });
           },
           addLabel: "+ 添加字段",
           withContentType: true,
@@ -106,11 +110,15 @@ export function mountBodyEditor(host: HTMLElement): () => void {
       case "urlencoded": {
         disposeChild = mountKVTable(panel, {
           rows: () => getRequest().urlEncoded,
-          append: (value) => {
-            value.urlEncoded = [...value.urlEncoded, emptyRow()];
+          append: () => {
+            updateRequest((value) => {
+              value.urlEncoded = [...value.urlEncoded, emptyRow()];
+            });
           },
-          remove: (value, index) => {
-            value.urlEncoded = value.urlEncoded.filter((_, position) => position !== index);
+          remove: (index) => {
+            updateRequest((value) => {
+              value.urlEncoded = value.urlEncoded.filter((_, position) => position !== index);
+            });
           },
           addLabel: "+ 添加字段",
           hint: "以 application/x-www-form-urlencoded 发送。",

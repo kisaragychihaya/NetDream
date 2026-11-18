@@ -41,6 +41,26 @@ type APIRequest struct {
 	Cookies    []KeyValue  `json:"cookies"`
 	Timeout    int         `json:"timeout"` // seconds; 0 uses the default
 	HTTP2      bool        `json:"http2"`   // h2c：对 http:// 明文强制 HTTP/2（https 始终自动协商，忽略此项）
+	// 预执行脚本（JS，goja 运行）；空 = 不执行。在 {{var}} 替换与请求组装之前运行。
+	PreScript string `json:"preScript"`
+	// 后执行脚本（JS，goja 运行）；空 = 不执行。拿到响应后运行。
+	PostScript string `json:"postScript"`
+	// 变量快照：{{var}} 替换与脚本 nd.vars 的数据源；脚本写回后经 APIResponse.Vars 返回。
+	Vars map[string]string `json:"vars"`
+}
+
+// ScriptLog is one console.log/warn/error call from a pre/post script.
+type ScriptLog struct {
+	Level string `json:"level"` // "log" | "warn" | "error"
+	Text  string `json:"text"`  // arguments serialized to JSON, joined with spaces
+	At    int64  `json:"at"`    // Unix 毫秒
+}
+
+// ScriptTest is one nd.test(name, fn) result from a pre/post script.
+type ScriptTest struct {
+	Name  string `json:"name"`
+	Pass  bool   `json:"pass"`
+	Error string `json:"error"` // failure message; empty when passed
 }
 
 // ResponseCookie is one cookie the response set.
@@ -69,6 +89,15 @@ type APIResponse struct {
 	FinalURL    string     `json:"finalURL"`
 	SentHeaders []KeyValue `json:"sentHeaders"`
 	SentBody    string     `json:"sentBody"` // text preview of the body, cut at 64KiB
+	// 脚本产物：Vars 是脚本写回后的变量全量快照（无脚本时原样返回）；
+	// ScriptLogs/ScriptTests 按产生顺序合并前后脚本。
+	Vars        map[string]string `json:"vars"`
+	ScriptLogs  []ScriptLog       `json:"scriptLogs"`
+	ScriptTests []ScriptTest      `json:"scriptTests"`
+	// 预脚本出错时非空（此时请求未发送，其余响应字段为零值）；
+	// 后脚本出错不影响已拿到的响应。
+	PreScriptError  string `json:"preScriptError"`
+	PostScriptError string `json:"postScriptError"`
 }
 
 // SSE：流式响应（Content-Type: text/event-stream）。Send 先推一个 Open，
@@ -155,6 +184,8 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	Cookies        []KeyValue       `json:"cookies"`
 	Timeout        int              `json:"timeout"`
 	HTTP2          bool             `json:"http2"`
+	PreScript      string           `json:"preScript"`  // 预执行脚本；空 = 无
+	PostScript     string           `json:"postScript"` // 后执行脚本；空 = 无
 	Assertions     []SavedAssertion `json:"assertions"`
 	Messages       []SavedMessage   `json:"messages"`       // 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol string           `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用

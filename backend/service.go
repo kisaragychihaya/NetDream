@@ -19,14 +19,70 @@ type RequestService struct{}
 // Send performs req and returns the response, along with what was actually sent.
 // An event stream arrives on stream instead of in the body.
 func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Channel[SSEMessage]) (APIResponse, error) {
+	// The variables the page sent travel out again as they came in when no
+	// script touches them.
+	if req.Vars == nil {
+		req.Vars = map[string]string{}
+	}
+	vars := req.Vars
+	logs := []ScriptLog{}
+	tests := []ScriptTest{}
+
+	// Every answer carries the variable snapshot and the script output, so the
+	// page's types hold even when nothing ran or the request fails.
+	failure := func(err error) (APIResponse, error) {
+		return APIResponse{Vars: vars, ScriptLogs: logs, ScriptTests: tests}, err
+	}
+
+	if req.PreScript != "" {
+		out, err := runPreScript(ctx, req.PreScript, &req, vars)
+		if out != nil {
+			vars = out.vars
+			logs = append(logs, out.logs...)
+			tests = append(tests, out.tests...)
+		}
+		if err != nil {
+			// A pre script that fails keeps the request from going out; the
+			// page shows the error with what the script logged until then.
+			return APIResponse{
+				Vars:           vars,
+				ScriptLogs:     logs,
+				ScriptTests:    tests,
+				PreScriptError: err.Error(),
+			}, nil
+		}
+	}
+	applyVars(&req, vars)
+
+	// finish runs the post script, once there is a response to run it against,
+	// and hangs what the scripts produced on it.
+	finish := func(res APIResponse) (APIResponse, error) {
+		if req.PostScript != "" {
+			out, err := runPostScript(ctx, req.PostScript, &req, &res, vars)
+			if out != nil {
+				vars = out.vars
+				logs = append(logs, out.logs...)
+				tests = append(tests, out.tests...)
+			}
+			if err != nil {
+				// The response itself stands: only its script failed.
+				res.PostScriptError = err.Error()
+			}
+		}
+		res.Vars = vars
+		res.ScriptLogs = logs
+		res.ScriptTests = tests
+		return res, nil
+	}
+
 	target, err := targetURL(req)
 	if err != nil {
-		return APIResponse{}, err
+		return failure(err)
 	}
 
 	body, contentType, sentBody, err := buildBody(req)
 	if err != nil {
-		return APIResponse{}, err
+		return failure(err)
 	}
 
 	reqCtx, cancel := context.WithCancel(ctx)
@@ -34,7 +90,7 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, methodOf(req.Method), target.String(), body)
 	if err != nil {
-		return APIResponse{}, fmt.Errorf("invalid request: %w", err)
+		return failure(fmt.Errorf("invalid request: %w", err))
 	}
 
 	explicit := map[string]bool{}
@@ -88,7 +144,7 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return APIResponse{}, fmt.Errorf("request failed: %w", deadlineCause(err, timedOut.Load()))
+		return failure(fmt.Errorf("request failed: %w", deadlineCause(err, timedOut.Load())))
 	}
 	defer resp.Body.Close()
 
@@ -105,12 +161,16 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 
 	if isEventStream(resp.Header) {
 		expire.Stop()
-		return streamEvents(resp.Body, meta, stream, start)
+		streamed, err := streamEvents(resp.Body, meta, stream, start)
+		if err != nil {
+			return failure(err)
+		}
+		return finish(streamed)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return APIResponse{}, fmt.Errorf("reading the response failed: %w", deadlineCause(err, timedOut.Load()))
+		return failure(fmt.Errorf("reading the response failed: %w", deadlineCause(err, timedOut.Load())))
 	}
 	truncated := len(data) > maxResponseBytes
 	if truncated {
@@ -121,7 +181,7 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 	meta.TimeMS = time.Since(start).Milliseconds()
 	meta.SizeBytes = len(data)
 	meta.Truncated = truncated
-	return meta, nil
+	return finish(meta)
 }
 
 // PickFile asks the user for a file and returns its path, or "" when they
