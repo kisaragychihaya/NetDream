@@ -1,0 +1,87 @@
+# 仅在发布 GitHub Release 时触发：构建 Windows x64/ARM64 与 macOS ARM64 产物并上传到该 Release。
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: |
+          bun install
+          bun install --cwd frontend
+
+      # -skip-installer：不生成 NSIS 安装包（也不需要下载 NSIS）。
+      - name: Build ${{ matrix.arch }}
+        run: bunx mygo build -skip-installer -platform windows/${{ matrix.arch }}
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $dir = "build/windows-${{ matrix.arch }}"
+          Copy-Item "$dir/NetDream.exe" "NetDream-$tag-windows-${{ matrix.arch }}.exe"
+          Compress-Archive -Path "$dir/NetDream.exe", "$dir/icon.png" `
+            -DestinationPath "NetDream-$tag-windows-${{ matrix.arch }}.zip"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            NetDream-*-windows-${{ matrix.arch }}.exe
+            NetDream-*-windows-${{ matrix.arch }}.zip
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: |
+          bun install
+          bun install --cwd frontend
+
+      # -sign -：ad-hoc 签名（无付费证书），首次打开需右键 → 打开。
+      - name: Build darwin/arm64
+        run: bunx mygo build -sign - -platform darwin/arm64
+
+      - name: Stage artifacts
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          app="$(ls -d build/darwin-arm64/*.app | head -n 1)"
+          ditto -c -k --keepParent "$app" "NetDream-$tag-darwin-arm64.zip"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/**/*.dmg
+            NetDream-*-darwin-arm64.zip
