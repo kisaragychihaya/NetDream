@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/png" href="./icon.png" />
+    <title>NetDream</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <!-- 工作区侧栏：名称、打开/保存、请求列表 -->
+      <aside id="workspace-sidebar"></aside>
+
+      <div id="main-area">
+        <!-- 方法 + URL + 发送 -->
+        <header id="topbar"></header>
+
+        <!-- 请求区：选项卡与编辑器 -->
+        <nav id="req-tabs" role="tablist" aria-label="请求"></nav>
+        <section id="req-panel"></section>
+
+        <!-- 响应区：选项卡、内容与断言侧栏 -->
+        <section id="response-pane">
+          <nav id="res-tabs" role="tablist" aria-label="响应"></nav>
+          <div id="res-content"></div>
+          <aside id="assert-panel"></aside>
+          <!-- Socket 响应区：kind=websocket/tcp 时可见 -->
+          <nav id="socket-res-tabs" role="tablist" aria-label="Socket 响应" hidden></nav>
+          <div id="socket-res-content" hidden></div>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "netdream",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "mygo dev",
+    "dev:ios": "mygo dev -platform ios",
+    "dev:android": "mygo dev -platform android",
+    "build": "mygo build",
+    "generate": "mygo generate",
+    "typecheck": "bun run --cwd frontend typecheck",
+    "sse:demo": "bun scripts/sse-demo.ts",
+    "socket:demo": "bun scripts/socket-demo.ts"
+  },
+  "devDependencies": {
+    "mygo-cli": "^0.10.0"
+  }
+}
