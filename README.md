@@ -54,7 +54,7 @@ bunx mygo build -platform windows/amd64 -skip-installer
 
 在 GitHub 上 **创建 Release**（`Release` → `Draft a new release` → 填 tag 如 `v0.1.0` 并发布）后，[release.yml](.github/workflows/release.yml) 会自动构建并上传：
 
-- Windows x64 / ARM64：`.exe` + `.zip`
+- Windows x64 / ARM64：`.exe` + `.zip` + NSIS 安装包（`-setup.exe`）
 - macOS ARM64：`.dmg` + `.app.zip`（ad-hoc 签名，首次打开需右键 → 打开）
 
 发布前把 `mygo.config.ts` 里的 `version` 改成与 tag 一致。

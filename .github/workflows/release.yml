@@ -31,9 +31,10 @@ jobs:
           bun install
           bun install --cwd frontend
 
-      # -skip-installer：不生成 NSIS 安装包（也不需要下载 NSIS）。
+      # 便携 exe + NSIS 安装包（NetDream-setup-<版本>-<arch>.exe，
+      # runner 未装 NSIS 时 mygo 会自动下载）。
       - name: Build ${{ matrix.arch }}
-        run: bunx mygo build -skip-installer -platform windows/${{ matrix.arch }}
+        run: bunx mygo build -platform windows/${{ matrix.arch }}
 
       - name: Stage artifacts
         shell: pwsh
@@ -41,6 +42,7 @@ jobs:
           $tag = "${{ github.event.release.tag_name }}"
           $dir = "build/windows-${{ matrix.arch }}"
           Copy-Item "$dir/NetDream.exe" "NetDream-$tag-windows-${{ matrix.arch }}.exe"
+          Copy-Item "$dir/*setup*.exe" "NetDream-$tag-windows-${{ matrix.arch }}-setup.exe"
           Compress-Archive -Path "$dir/NetDream.exe", "$dir/icon.png" `
             -DestinationPath "NetDream-$tag-windows-${{ matrix.arch }}.zip"
 
@@ -49,6 +51,7 @@ jobs:
         with:
           files: |
             NetDream-*-windows-${{ matrix.arch }}.exe
+            NetDream-*-windows-${{ matrix.arch }}-setup.exe
             NetDream-*-windows-${{ matrix.arch }}.zip
 
   macos:

@@ -54,7 +54,7 @@ bunx mygo build -platform windows/amd64 -skip-installer
 
 **Create a GitHub Release** (`Release` → `Draft a new release` → enter a tag like `v0.1.0` and publish). [release.yml](.github/workflows/release.yml) then builds and uploads automatically:
 
-- Windows x64 / ARM64: `.exe` + `.zip`
+- Windows x64 / ARM64: `.exe` + `.zip` + NSIS installer (`-setup.exe`)
 - macOS ARM64: `.dmg` + `.app.zip` (ad-hoc signed; right-click → Open on first launch)
 
 Bump `version` in `mygo.config.ts` to match the tag before releasing.
