@@ -1,12 +1,18 @@
-# 仅在发布 GitHub Release 时触发：构建 Windows x64/ARM64 与 macOS ARM64 产物并上传到该 Release。
+# 发布 GitHub Release 时：构建 Windows x64/ARM64 与 macOS ARM64 产物并上传到该 Release。
+# 手动触发（Actions 页 Run workflow）：只构建并以 workflow artifacts 留存，不上传 Release。
 name: Release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+# 产物命名用的版本标识：Release 触发用 tag；手动触发用分支名（如 main）。
+env:
+  VERSION: ${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   windows:
@@ -39,7 +45,7 @@ jobs:
       - name: Stage artifacts
         shell: pwsh
         run: |
-          $tag = "${{ github.event.release.tag_name }}"
+          $tag = "$env:VERSION"
           $dir = "build/windows-${{ matrix.arch }}"
           Copy-Item "$dir/NetDream.exe" "NetDream-$tag-windows-${{ matrix.arch }}.exe"
           Copy-Item "$dir/*setup*.exe" "NetDream-$tag-windows-${{ matrix.arch }}-setup.exe"
@@ -47,9 +53,20 @@ jobs:
             -DestinationPath "NetDream-$tag-windows-${{ matrix.arch }}.zip"
 
       - name: Upload to release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            NetDream-*-windows-${{ matrix.arch }}.exe
+            NetDream-*-windows-${{ matrix.arch }}-setup.exe
+            NetDream-*-windows-${{ matrix.arch }}.zip
+
+      - name: Upload artifacts (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetDream-windows-${{ matrix.arch }}
+          path: |
             NetDream-*-windows-${{ matrix.arch }}.exe
             NetDream-*-windows-${{ matrix.arch }}-setup.exe
             NetDream-*-windows-${{ matrix.arch }}.zip
@@ -78,13 +95,23 @@ jobs:
 
       - name: Stage artifacts
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="$VERSION"
           app="$(ls -d build/darwin-arm64/*.app | head -n 1)"
           ditto -c -k --keepParent "$app" "NetDream-$tag-darwin-arm64.zip"
 
       - name: Upload to release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            build/**/*.dmg
+            NetDream-*-darwin-arm64.zip
+
+      - name: Upload artifacts (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetDream-darwin-arm64
+          path: |
             build/**/*.dmg
             NetDream-*-darwin-arm64.zip
