@@ -10,7 +10,7 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 
 ## 特性
 
-- **HTTP 调试**：方法 / Header / Query / Path 参数 / Body（form-data、urlencoded、raw、binary）、Basic / Bearer 认证、Cookie、超时
+- **HTTP 调试**：方法 / Header / Query / Path 参数 / Body（form-data 文本与**文件**字段、urlencoded、raw、binary）、Basic / Bearer 认证、Cookie、超时
 - **HTTP/2**：`https://` 自动协商，`http://` 可强制 h2c，响应协议版本可见
 - **SSE 流式响应**：事件实时列表、随时停止
 - **WebSocket / TCP 调试**：连接 / 断开、握手请求头 / 查询参数 / 子协议、消息模板（Text / JSON / XML / HTML / Binary）、实时收发日志、握手响应头
@@ -66,7 +66,6 @@ bunx mygo build -platform windows/amd64 -skip-installer
 ## 已知限制
 
 - 工作区路径不跨重启记忆；列表暂无搜索 / 排序
-- form-data 仅支持文本字段（无文件上传）
 
 ## License
 

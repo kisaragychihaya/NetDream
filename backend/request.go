@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"fmt"
@@ -83,10 +84,25 @@ func buildBody(req APIRequest) (io.Reader, string, string, error) {
 	case "formData":
 		buf := new(bytes.Buffer)
 		w := multipart.NewWriter(buf)
+		fields := 0
+		files := []string{}
 		for _, f := range req.FormData {
 			if f.Key == "" {
 				continue
 			}
+			if f.Kind == "file" {
+				if strings.TrimSpace(f.FilePath) == "" {
+					return nil, "", "", fmt.Errorf("form-data 文件字段 %q 未选择文件", f.Key)
+				}
+				size, err := writeFormFile(w, f)
+				if err != nil {
+					return nil, "", "", err
+				}
+				fields++
+				files = append(files, fmt.Sprintf("%s (%d bytes)", filepath.Base(f.FilePath), size))
+				continue
+			}
+			fields++
 			if f.ContentType == "" {
 				if err := w.WriteField(f.Key, f.Value); err != nil {
 					return nil, "", "", fmt.Errorf("building the multipart body: %w", err)
@@ -107,7 +123,13 @@ func buildBody(req APIRequest) (io.Reader, string, string, error) {
 		if err := w.Close(); err != nil {
 			return nil, "", "", fmt.Errorf("building the multipart body: %w", err)
 		}
-		return buf, w.FormDataContentType(), "[multipart/form-data]", nil
+		// The page cannot show a multipart body as text, so the preview names
+		// what went into it instead.
+		preview := "[multipart/form-data]"
+		if len(files) > 0 {
+			preview = fmt.Sprintf("[multipart/form-data: %d 字段，含文件 %s]", fields, strings.Join(files, "、"))
+		}
+		return buf, w.FormDataContentType(), preview, nil
 
 	case "urlencoded":
 		values := url.Values{}
@@ -160,6 +182,62 @@ func rawContentType(rawType string) string {
 // quoteMultipart escapes a name for a part's Content-Disposition header.
 func quoteMultipart(name string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(name)
+}
+
+// writeFormFile writes one file field as a part and returns the file's size.
+// Its Content-Type is the field's own when set, else what the bytes look like.
+func writeFormFile(w *multipart.Writer, f FormField) (int64, error) {
+	fail := func(err error) (int64, error) {
+		return 0, fmt.Errorf("form-data 文件字段 %q 读取 %s 失败: %w", f.Key, f.FilePath, err)
+	}
+
+	src, err := os.Open(f.FilePath)
+	if err != nil {
+		return fail(err)
+	}
+	defer src.Close()
+
+	info, err := src.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("form-data 文件字段 %q 的路径不是文件: %s", f.Key, f.FilePath)
+	}
+	if info.Size() > maxBinaryBytes {
+		return 0, fmt.Errorf("form-data 文件字段 %q 的 %s 是 %d bytes，超过 %d MiB 上限", f.Key, f.FilePath, info.Size(), maxBinaryBytes>>20)
+	}
+
+	r := bufio.NewReader(src)
+	contentType := f.ContentType
+	if contentType == "" {
+		contentType = sniffContentType(r)
+	}
+
+	part, err := w.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="` + quoteMultipart(f.Key) + `"; filename="` + quoteMultipart(filepath.Base(f.FilePath)) + `"`},
+		"Content-Type":        {contentType},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("building the multipart body: %w", err)
+	}
+	if _, err := io.Copy(part, r); err != nil {
+		return fail(err)
+	}
+	return info.Size(), nil
+}
+
+// sniffContentType reports what the start of a part looks like, without
+// consuming it. A file too short or too odd to read falls back to bytes.
+func sniffContentType(r *bufio.Reader) string {
+	head, err := r.Peek(512)
+	if len(head) == 0 && err != nil {
+		return "application/octet-stream"
+	}
+	if ct := http.DetectContentType(head); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
 }
 
 // readBinary reads the file a binary body sends, refusing one over the limit.

@@ -4,8 +4,10 @@ import {
   emptyRow,
   getRequest,
   RAW_TYPES,
+  setFormFilePath,
   subscribe,
   updateRequest,
+  updateResponse,
   type BodyType,
   type RawType,
 } from "../state";
@@ -33,6 +35,17 @@ const RAW_PLACEHOLDERS: Record<RawType, string> = {
   xml: "<note>\n  <to>NetDream</to>\n</note>",
   html: "<h1>Hello</h1>",
 };
+
+// form-data 文件字段的「选择」与 binary 共用同一个原生对话框：拿到非空路径就
+// 写回对应行；取消（空串）什么都不做。拖入的路径由 main.ts 的 onFileDrop 走同一条写回。
+async function pickFormFile(index: number): Promise<void> {
+  try {
+    const picked = await RequestService.pickFile();
+    if (picked !== "") setFormFilePath(index, picked);
+  } catch (error) {
+    updateResponse({ error: error instanceof Error ? error.message : String(error) });
+  }
+}
 
 export function mountBodyEditor(host: HTMLElement): () => void {
   host.textContent = "";
@@ -103,7 +116,11 @@ export function mountBodyEditor(host: HTMLElement): () => void {
           },
           addLabel: "+ 添加字段",
           withContentType: true,
-          hint: "以 multipart/form-data 发送；「内容类型」留空时使用默认值。",
+          withFileKind: true,
+          pickFile: (index) => {
+            void pickFormFile(index);
+          },
+          hint: "以 multipart/form-data 发送；「内容类型」留空时使用默认值；文件字段发送时读取所选文件。",
         });
         break;
       }

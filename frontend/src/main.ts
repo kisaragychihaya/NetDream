@@ -38,6 +38,7 @@ import {
   pushStreamEvent,
   renameEntry,
   renameWorkspace,
+  setFormFilePath,
   setStreamChannel,
   setVars,
   setWorkspaceDirty,
@@ -294,6 +295,18 @@ async function openWorkspace(): Promise<void> {
   }
 }
 
+// 拖入落在 form-data 的文件控件上时，把第一个路径填进那一行（不打开工作区）。
+// drop.x / drop.y 是页面视口 CSS 像素，与 clientX/clientY 同义，可直接喂 elementFromPoint。
+function dropOntoFormField(x: number, y: number, paths: string[]): boolean {
+  const holder = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-file-drop-index]") ?? null;
+  const path = paths[0];
+  if (holder === null || path === undefined) return false;
+  const index = Number(holder.dataset.fileDropIndex);
+  if (!Number.isInteger(index)) return false;
+  setFormFilePath(index, path);
+  return true;
+}
+
 // 拖入的 .band：mygo 原生拖放投递绝对路径，按路径读盘，「保存」直接写回原文件。
 async function openDroppedWorkspace(paths: string[]): Promise<void> {
   const path = paths.find((item) => item.toLowerCase().endsWith(".band"));
@@ -507,7 +520,9 @@ subscribeSocket(() => {
 });
 
 // 拖入 .band 由原生层接管，页面不消费 DOM drop 事件：订阅一次拿绝对路径。
+// 落点落在 form-data 的文件控件上时改为把路径填进那一行，其余情况照旧打开工作区。
 onFileDrop((drop) => {
+  if (dropOntoFormField(drop.x, drop.y, drop.paths)) return;
   void openDroppedWorkspace(drop.paths);
 });
 

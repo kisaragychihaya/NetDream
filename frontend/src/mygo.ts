@@ -84,6 +84,13 @@ export interface FormField {
   contentType: string;
   /** Description is a note for the user, not sent. */
   description: string;
+  /** Kind 是字段类型："text"（默认，空同义）| "file"。 */
+  kind: string;
+  /**
+   * FilePath 是 Kind="file" 时文件的绝对路径；发送时读盘作为文件 part 上传
+   * （单文件上限同 binary 的 100MB）。
+   */
+  filePath: string;
 }
 
 /** KeyValue is one key/value pair, e.g. a query parameter, a header or a cookie. */

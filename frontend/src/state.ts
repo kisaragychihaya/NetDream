@@ -47,8 +47,15 @@ export interface KVRow {
   enabled: boolean;
 }
 
+/** form-data 字段类型：文本值，或把所选文件作为文件 part 上传。 */
+export const FORM_FIELD_KINDS = ["text", "file"] as const;
+export type FormFieldKind = (typeof FORM_FIELD_KINDS)[number];
+
 export interface FormRow extends KVRow {
   contentType: string;
+  kind: FormFieldKind;
+  /** kind === "file" 时上传的文件绝对路径。 */
+  filePath: string;
 }
 
 export interface AuthState {
@@ -114,7 +121,15 @@ export function emptyRow(): KVRow {
 }
 
 export function emptyFormRow(): FormRow {
-  return { key: "", value: "", contentType: "", description: "", enabled: true };
+  return {
+    key: "",
+    value: "",
+    contentType: "",
+    description: "",
+    enabled: true,
+    kind: "text",
+    filePath: "",
+  };
 }
 
 function defaultRequest(kind: RequestKind = "http"): RequestState {
@@ -187,6 +202,19 @@ export function updateRequest(mutate?: (state: RequestState) => void): void {
   syncPathParams();
   scheduleSave();
   notify();
+}
+
+// form-data 的文件行路径由拖拽落点路由到这里（见 main.ts 的 onFileDrop）。
+// 换掉数组让表格重画，文件控件随之显示新的文件名。
+export function setFormFilePath(index: number, path: string): void {
+  if (path === "") return;
+  updateRequest((state) => {
+    const row = state.formData[index];
+    if (row === undefined || row.kind !== "file") return;
+    state.formData = state.formData.map((item, position) =>
+      position === index ? { ...item, filePath: path } : item,
+    );
+  });
 }
 
 export function updateResponse(patch: Partial<ResponseState>): void {
@@ -348,6 +376,9 @@ function hydrateFormRows(value: unknown): FormRow[] {
       contentType: text(item.contentType),
       description: text(item.description),
       enabled: flag(item.enabled, true),
+      // 旧快照没有这两个字段：一律回落到文本行。
+      kind: oneOf(item.kind, FORM_FIELD_KINDS, "text"),
+      filePath: text(item.filePath),
     });
   }
   return rows;
@@ -509,6 +540,8 @@ export function buildRequest(): APIRequest {
         value: row.value,
         contentType: row.contentType,
         description: row.description,
+        kind: row.kind,
+        filePath: row.filePath,
       })),
     urlEncoded: wireValues(state.urlEncoded),
     raw: state.raw,
@@ -555,6 +588,9 @@ function formRowsFromFields(fields: readonly FormField[]): FormRow[] {
     contentType: field.contentType,
     description: field.description,
     enabled: true,
+    // 旧 .band 的字段没有 kind：回落到文本行。
+    kind: oneOf(field.kind, FORM_FIELD_KINDS, "text"),
+    filePath: text(field.filePath),
   }));
 }
 
@@ -743,6 +779,8 @@ export function snapshotCurrent(): SavedRequest {
         value: row.value,
         contentType: row.contentType,
         description: row.description,
+        kind: row.kind,
+        filePath: row.filePath,
       })),
     urlEncoded: wireValues(state.urlEncoded),
     raw: state.raw,

@@ -65,6 +65,11 @@ type FormField struct {
 	Value       string `json:"value"`
 	ContentType string `json:"contentType"` // 覆盖该字段的 part Content-Type；空为默认
 	Description string `json:"description"`
+	// Kind 是字段类型："text"（默认，空同义）| "file"。
+	Kind string `json:"kind"`
+	// FilePath 是 Kind="file" 时文件的绝对路径；发送时读盘作为文件 part 上传
+	//（单文件上限同 binary 的 100MB）。
+	FilePath string `json:"filePath"`
 }
 
 type AuthInfo struct {
@@ -211,7 +216,11 @@ type SocketEvent struct {
   - SSE 解析按规范：空行分派事件；`data:` 多行以 \n 拼接；`event:`/`id:` 透传；
     `:` 开头注释与 `retry:` 忽略。
   - Query 参数拼到 URL；BodyType 语义：
-    - `formData` → `multipart/form-data`（仅文本字段；字段 ContentType 非空时写 part 头）
+    - `formData` → `multipart/form-data`（文本字段直写；`Kind="file"` 的字段把
+      `FilePath` 读盘作为文件 part 上传：filename=basename，Content-Type 取字段显式值
+      否则 Peek 512 字节嗅探、兜底 octet-stream，单文件 ≤100MB；空 FilePath 报错。
+      流式读盘不整块进内存。预览串无文件时 `[multipart/form-data]`，有文件时
+      `[multipart/form-data: N 字段，含文件 a.png (123 bytes)]`）
     - `urlencoded` → `application/x-www-form-urlencoded`
     - `raw` → 按 RawType 设 Content-Type（json/text/xml/html），无自定义 Content-Type 头时生效
     - `binary` → 读 BinaryPath 文件（≤100MB），默认 `application/octet-stream`
@@ -548,6 +557,14 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   `WorkspaceService.openPath` 读盘。侧栏保留 dragover 高亮虚线框（只作视觉
   反馈，不再消费 drop 事件）；非 `.band` 文件在响应区错误条提示；
   一次拖多个文件取第一个 `.band`。拖入打开带真实路径，「保存」直接写回原文件。
+  **落点路由**：onFileDrop 负载含视口坐标 `{paths,x,y}`——`elementFromPoint(x,y)`
+  命中 form-data 文件控件（`[data-file-drop-index]`）时把 `paths[0]` 填进该行
+  （`setFormFilePath`），不触发工作区打开；其余落点才走上述 .band 流程。
+- form-data 文件行（kvTable 的 opt-in `withFileKind` + `pickFile`，仅 bodyEditor
+  的 formData 表开启）：每行「类型」分段切换文本/文件；文件行值单元格换成文件控件
+  （basename 或占位「未选择文件」、完整路径在 title、「选择」按钮经
+  `RequestService.pickFile()` 选盘），容器带 `data-file-drop-index` 与 dragover
+  高亮（纯视觉反馈）。`FormRow` 带 `kind/filePath`，随 .band 持久化（旧数据按文本行读）。
 
 ### 约定
 

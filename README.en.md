@@ -8,7 +8,7 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 
 ## Features
 
-- **HTTP debugging**: methods / headers / query / path params / body (form-data, urlencoded, raw, binary), Basic / Bearer auth, cookies, timeouts
+- **HTTP debugging**: methods / headers / query / path params / body (form-data text and **file** fields, urlencoded, raw, binary), Basic / Bearer auth, cookies, timeouts
 - **HTTP/2**: ALPN negotiation on `https://`, forced h2c on `http://`, response protocol visible
 - **SSE streaming**: live event table, stop anytime
 - **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
@@ -66,7 +66,6 @@ bunx mygo build -platform windows/amd64 -skip-installer
 ## Known limitations
 
 - Workspace path is not remembered across restarts; no search / sorting in the list yet
-- form-data supports text fields only (no file uploads)
 
 ## License
 
