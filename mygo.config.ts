@@ -3,7 +3,7 @@ import { defineConfig } from "mygo-cli";
 export default defineConfig({
   name: "NetDream",
   identifier: "com.example.netdream",
-  version: "0.2.2",
+  version: "0.2.3",
   // 应用图标（窗口标题栏/任务栏/打包产物）：正方形 PNG，放 resources/icon.png。
   icon: "resources/icon.png",
   // The Go package of the app, a directory of this project (backend/).
