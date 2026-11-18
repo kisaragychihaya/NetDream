@@ -1,4 +1,4 @@
-# NetDream! It's MyGO!!!!!
+# <img src="resources/icon.png" width="36" alt="NetDream"> NetDream! It's MyGO!!!!!
 
 **An offline Postman alternative built with [MyGO](https://github.com/egoist/mygo)**
 
@@ -62,15 +62,6 @@ bun run build                                    # current platform, output in b
 bunx mygo build -platform darwin/arm64           # cross-compilation (MyGO needs no cgo)
 bunx mygo build -platform windows/amd64 -skip-installer
 ```
-
-## Release
-
-**Create a GitHub Release** (`Release` → `Draft a new release` → enter a tag like `v0.1.0` and publish). [release.yml](.github/workflows/release.yml) then builds and uploads automatically:
-
-- Windows x64 / ARM64: `.exe` + `.zip` + NSIS installer (`-setup.exe`)
-- macOS ARM64: `.dmg` + `.app.zip` (ad-hoc signed; right-click → Open on first launch)
-
-Bump `version` in `mygo.config.ts` to match the tag before releasing.
 
 ## Known limitations
 

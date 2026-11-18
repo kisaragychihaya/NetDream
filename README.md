@@ -1,4 +1,4 @@
-# NetDream! It's MyGO!!!!!
+# <img src="resources/icon.png" width="36" alt="NetDream"> NetDream! It's MyGO!!!!!
 
 **一个使用 [MyGO](https://github.com/egoist/mygo) 开发的 Postman 离线替代品**
 
@@ -60,15 +60,6 @@ bun run build                                    # 当前平台，产物在 buil
 bunx mygo build -platform darwin/arm64           # 交叉构建（MyGO 不需要 cgo）
 bunx mygo build -platform windows/amd64 -skip-installer
 ```
-
-## 发布
-
-在 GitHub 上 **创建 Release**（`Release` → `Draft a new release` → 填 tag 如 `v0.1.0` 并发布）后，[release.yml](.github/workflows/release.yml) 会自动构建并上传：
-
-- Windows x64 / ARM64：`.exe` + `.zip` + NSIS 安装包（`-setup.exe`）
-- macOS ARM64：`.dmg` + `.app.zip`（ad-hoc 签名，首次打开需右键 → 打开）
-
-发布前把 `mygo.config.ts` 里的 `version` 改成与 tag 一致。
 
 ## 已知限制
 
