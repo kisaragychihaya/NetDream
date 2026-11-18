@@ -66,7 +66,6 @@ bunx mygo build -platform windows/amd64 -skip-installer
 ## 已知限制
 
 - 工作区路径不跨重启记忆；列表暂无搜索 / 排序
-- 预执行 / 后执行脚本页为占位
 - form-data 仅支持文本字段（无文件上传）
 
 ## License

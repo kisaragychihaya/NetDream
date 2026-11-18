@@ -66,7 +66,6 @@ bunx mygo build -platform windows/amd64 -skip-installer
 ## Known limitations
 
 - Workspace path is not remembered across restarts; no search / sorting in the list yet
-- Pre-request / post-request script tabs are placeholders
 - form-data supports text fields only (no file uploads)
 
 ## License
