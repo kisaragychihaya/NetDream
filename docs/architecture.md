@@ -12,7 +12,8 @@ backend/
   types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send、PickFile（仅有的两个导出方法）
   request.go           # 未导出 helper：URL/Body 构造、头与 Cookie、响应整形、截断、h2c 传输
-  script.go            # 脚本引擎（goja）：预/后执行脚本 + {{var}} 替换，全部未导出
+  script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
+  ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
   sse.go               # SSE：Content-Type 判定、Open/Event 推送、事件流解析器
   socket.go            # SocketService：Connect/Send/Disconnect + 连接注册表 + WS/TCP 读写循环
   workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写
@@ -247,6 +248,14 @@ type SocketEvent struct {
       BodyType=raw、RawType 空补 text），后脚本为只读快照
     - `nd.response`（仅后脚本）：`{status,statusText,headers,body,timeMS,sizeBytes}` + `json()`
     - `nd.test(name, fn)`（fn 抛异常 = 失败，不中断脚本）、`nd.assert(cond, msg)`
+    - `nd.crypto`：md5/sha1/sha256/sha512（encoding 默认 hex）、hmac、base64(+url)、
+      hex、aesEncrypt/aesDecrypt（cbc 默认 PKCS#7 / gcm，key、iv 为 base64）、
+      randomBytes/randomHex；字符串进出，非法参数一律抛 Error（backend/ndapi/crypto.go）
+    - `nd.time`：`now()`/`unix()`（毫秒/秒时间戳）、`format(ms, layout, timeZone?)`
+      （Go 布局 + IANA 时区，省略按本地）、`parse(s, layout, timeZone?)`（严格解析，
+      失败返回 null 而非抛异常）、`offset()`/`zone()`（本地偏移分钟数，符号同
+      Date.getTimezoneOffset()）——Date 的解析与 toLocale* 在 goja 里不可靠，
+      时区相关一律走这里（backend/ndapi/time.go）
     - `console.log/warn/error(...)` → ScriptLogs（「控制台」页签）
 - `PickFile() (string, error)` — 原生打开文件对话框（`mygo.Dialog.Open`），
   用户取消时返回 `("", nil)`。

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,6 +10,8 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+
+	"netdream/backend/ndapi"
 )
 
 // varPattern matches a {{name}} reference inside any string a request carries.
@@ -37,16 +38,26 @@ type scriptOutcome struct {
 	tests []ScriptTest
 }
 
-// scriptRun is one live goja run. The objects it injected stay reachable, so a
-// pre script's edits can be read back into the request afterwards.
+// scriptRun is one live goja run: the runtime, what it runs for, the ND API
+// state injected into it, and what the script reported through that state. The
+// objects it injected stay reachable, so a pre script's edits can be read back
+// into the request afterwards.
 type scriptRun struct {
-	vm      *goja.Runtime
-	kind    string
-	body    string // nd.request.body as injected, to tell an edit from the original
-	logs    []ScriptLog
-	tests   []ScriptTest
-	vars    *goja.Object
-	request *goja.Object
+	vm    *goja.Runtime
+	kind  string
+	logs  []ScriptLog
+	tests []ScriptTest
+	api   *ndapi.Run
+}
+
+// Log keeps one console line the script wrote.
+func (run *scriptRun) Log(level, text string, at int64) {
+	run.logs = append(run.logs, ScriptLog{Level: level, Text: text, At: at})
+}
+
+// Test keeps one nd.test result the script recorded.
+func (run *scriptRun) Test(name string, pass bool, errText string) {
+	run.tests = append(run.tests, ScriptTest{Name: name, Pass: pass, Error: errText})
 }
 
 // runPreScript runs code against req and vars, then writes the script's edits
@@ -98,23 +109,55 @@ func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIR
 // shared between runs: a new goja runtime per script is the isolation.
 func newScriptRun(kind string, req *APIRequest, resp *APIResponse, vars map[string]string) *scriptRun {
 	vm := goja.New()
-	run := &scriptRun{vm: vm, kind: kind, vars: vm.NewObject()}
-	for k, v := range vars {
-		_ = run.vars.Set(k, v)
-	}
+	run := &scriptRun{vm: vm, kind: kind}
+	run.api = ndapi.NewRun(vm, vars, run)
 
 	nd := vm.NewObject()
-	_ = nd.Set("vars", run.varsGlobal())
-	_ = nd.Set("request", run.requestGlobal(req))
+	_ = nd.Set("vars", run.api.VarsGlobal())
+	_ = nd.Set("request", run.api.RequestGlobal(scriptRequest(req)))
 	if resp != nil {
-		_ = nd.Set("response", run.responseGlobal(resp))
+		_ = nd.Set("response", run.api.ResponseGlobal(scriptResponse(resp)))
 	}
-	_ = nd.Set("test", run.testGlobal())
-	_ = nd.Set("assert", run.assertGlobal())
+	_ = nd.Set("test", run.api.TestGlobal())
+	_ = nd.Set("assert", run.api.AssertGlobal())
+	_ = nd.Set("crypto", run.api.CryptoGlobal())
+	_ = nd.Set("time", run.api.TimeGlobal())
 
 	_ = vm.Set("nd", nd)
-	_ = vm.Set("console", run.consoleGlobal())
+	_ = vm.Set("console", run.api.ConsoleGlobal())
 	return run
+}
+
+// scriptRequest is the request as a pre script sees it.
+func scriptRequest(req *APIRequest) *ndapi.Request {
+	return &ndapi.Request{
+		Method:  req.Method,
+		URL:     req.URL,
+		Headers: scriptPairs(req.Headers),
+		Query:   scriptPairs(req.Params),
+		Body:    initialBody(req),
+	}
+}
+
+// scriptResponse is the response as a post script sees it.
+func scriptResponse(resp *APIResponse) *ndapi.Response {
+	return &ndapi.Response{
+		Status:     resp.Status,
+		StatusText: resp.StatusText,
+		Headers:    scriptPairs(resp.Headers),
+		Body:       resp.Body,
+		TimeMS:     resp.TimeMS,
+		SizeBytes:  resp.SizeBytes,
+	}
+}
+
+// scriptPairs hands a request's pairs to the script side, in order.
+func scriptPairs(list []KeyValue) []ndapi.Pair {
+	out := make([]ndapi.Pair, 0, len(list))
+	for _, kv := range list {
+		out = append(out, ndapi.Pair{Key: kv.Key, Value: kv.Value})
+	}
+	return out
 }
 
 // execute runs code with the timeout and the page's lifetime both able to stop
@@ -158,209 +201,29 @@ func (run *scriptRun) outcome(vars map[string]string) *scriptOutcome {
 	return &scriptOutcome{vars: vars, logs: run.logs, tests: run.tests}
 }
 
-// exportedVars reads the variable object back into a plain map: whatever the
-// script left in it is the set the request goes on with.
+// exportedVars is the variable set the script left behind: whatever is in
+// nd.vars at exit is the set the request goes on with.
 func (run *scriptRun) exportedVars() map[string]string {
-	out := make(map[string]string, len(run.vars.Keys()))
-	run.vm.Try(func() {
-		for _, key := range run.vars.Keys() {
-			if value := run.vars.Get(key); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-				out[key] = value.String()
-			}
-		}
-	})
-	return out
-}
-
-// varsGlobal is nd.vars: a plain JS object behind accessors, so a script reads
-// and writes variables without a live bridge to Go.
-func (run *scriptRun) varsGlobal() *goja.Object {
-	vm := run.vm
-	store := run.vars
-	api := vm.NewObject()
-
-	_ = api.Set("get", func(call goja.FunctionCall) goja.Value {
-		value := store.Get(call.Argument(0).String())
-		if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
-			return goja.Null()
-		}
-		return value
-	})
-	_ = api.Set("set", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		if key == "" {
-			return goja.Undefined()
-		}
-		_ = store.Set(key, valueText(call.Argument(1)))
-		return goja.Undefined()
-	})
-	_ = api.Set("unset", func(call goja.FunctionCall) goja.Value {
-		_ = store.Delete(call.Argument(0).String())
-		return goja.Undefined()
-	})
-	_ = api.Set("has", func(call goja.FunctionCall) goja.Value {
-		value := store.Get(call.Argument(0).String())
-		return vm.ToValue(value != nil && !goja.IsUndefined(value) && !goja.IsNull(value))
-	})
-	_ = api.Set("toObject", func(goja.FunctionCall) goja.Value {
-		out := vm.NewObject()
-		for _, key := range store.Keys() {
-			_ = out.Set(key, store.Get(key))
-		}
-		return out
-	})
-	return api
-}
-
-// requestGlobal is nd.request: the request as the script sees it.
-func (run *scriptRun) requestGlobal(req *APIRequest) *goja.Object {
-	vm := run.vm
-	run.request = vm.NewObject()
-	run.body = initialBody(req)
-
-	_ = run.request.Set("method", req.Method)
-	_ = run.request.Set("url", req.URL)
-	_ = run.request.Set("headers", flatObject(vm, req.Headers))
-	_ = run.request.Set("query", flatObject(vm, req.Params))
-	_ = run.request.Set("body", run.body)
-	return run.request
-}
-
-// responseGlobal is nd.response: read-only, plus json() for a parsed body.
-func (run *scriptRun) responseGlobal(resp *APIResponse) *goja.Object {
-	vm := run.vm
-	obj := vm.NewObject()
-
-	_ = obj.Set("status", resp.Status)
-	_ = obj.Set("statusText", resp.StatusText)
-	_ = obj.Set("headers", flatObject(vm, resp.Headers))
-	_ = obj.Set("body", resp.Body)
-	_ = obj.Set("timeMS", resp.TimeMS)
-	_ = obj.Set("sizeBytes", resp.SizeBytes)
-
-	parse := vm.Get("JSON").ToObject(vm).Get("parse")
-	body := resp.Body
-	_ = obj.Set("json", func(goja.FunctionCall) goja.Value {
-		// Go parses first only for the message: JSON.parse then hands back
-		// real JS values, so arrays keep their methods.
-		var scratch any
-		if err := json.Unmarshal([]byte(body), &scratch); err != nil {
-			panic(run.newError("nd.response.json(): " + err.Error()))
-		}
-		call, ok := goja.AssertFunction(parse)
-		if !ok {
-			return vm.ToValue(scratch)
-		}
-		value, err := call(goja.Undefined(), vm.ToValue(body))
-		if err != nil {
-			var interrupted *goja.InterruptedError
-			if errors.As(err, &interrupted) {
-				panic(interrupted)
-			}
-			panic(run.newError("nd.response.json(): " + scriptErrorText(err)))
-		}
-		return value
-	})
-	return obj
-}
-
-// testGlobal is nd.test(name, fn): each call records one result, and a failed
-// test does not stop the script.
-func (run *scriptRun) testGlobal() func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		name := call.Argument(0).String()
-		fn, ok := goja.AssertFunction(call.Argument(1))
-		if !ok {
-			run.tests = append(run.tests, ScriptTest{Name: name, Error: "nd.test(name, fn) needs a function"})
-			return goja.Undefined()
-		}
-		if _, err := fn(goja.Undefined()); err != nil {
-			var interrupted *goja.InterruptedError
-			if errors.As(err, &interrupted) {
-				panic(interrupted) // a fired interrupt ends the script, tests included
-			}
-			run.tests = append(run.tests, ScriptTest{Name: name, Error: scriptErrorText(err)})
-			return goja.Undefined()
-		}
-		run.tests = append(run.tests, ScriptTest{Name: name, Pass: true})
-		return goja.Undefined()
-	}
-}
-
-// assertGlobal is nd.assert(cond, msg): a falsy condition throws msg.
-func (run *scriptRun) assertGlobal() func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		if call.Argument(0).ToBoolean() {
-			return goja.Undefined()
-		}
-		msg := "assertion failed"
-		if arg := call.Argument(1); arg != nil && !goja.IsUndefined(arg) && !goja.IsNull(arg) {
-			if text := arg.String(); text != "" {
-				msg = text
-			}
-		}
-		panic(run.newError(msg))
-	}
-}
-
-// consoleGlobal is console.log/warn/error: arguments serialized, joined with
-// spaces, kept as a log line the page shows.
-func (run *scriptRun) consoleGlobal() *goja.Object {
-	vm := run.vm
-	obj := vm.NewObject()
-	stringify := vm.Get("JSON").ToObject(vm).Get("stringify")
-
-	serialize := func(v goja.Value) string {
-		if v == nil || goja.IsUndefined(v) {
-			return "undefined"
-		}
-		if fn, ok := goja.AssertFunction(stringify); ok {
-			if text, err := fn(goja.Undefined(), v); err == nil && text != nil && !goja.IsUndefined(text) && !goja.IsNull(text) {
-				return text.String()
-			}
-		}
-		var fallback string
-		vm.Try(func() { fallback = fmt.Sprint(v.Export()) })
-		return fallback
-	}
-
-	logAt := func(level string) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			parts := make([]string, 0, len(call.Arguments))
-			for _, arg := range call.Arguments {
-				parts = append(parts, serialize(arg))
-			}
-			run.logs = append(run.logs, ScriptLog{
-				Level: level,
-				Text:  strings.Join(parts, " "),
-				At:    time.Now().UnixMilli(),
-			})
-			return goja.Undefined()
-		}
-	}
-
-	_ = obj.Set("log", logAt("log"))
-	_ = obj.Set("warn", logAt("warn"))
-	_ = obj.Set("error", logAt("error"))
-	return obj
+	return run.api.ExportedVars()
 }
 
 // applyRequest writes what the pre script left in nd.request back into req.
 func (run *scriptRun) applyRequest(req *APIRequest) {
-	if method := stringField(run.request.Get("method")); method != "" {
+	request := run.api.RequestObject()
+	if method := stringField(request.Get("method")); method != "" {
 		req.Method = method
 	}
-	if target := stringField(run.request.Get("url")); target != "" {
+	if target := stringField(request.Get("url")); target != "" {
 		req.URL = target
 	}
-	if headers, ok := run.request.Get("headers").(*goja.Object); ok {
+	if headers, ok := request.Get("headers").(*goja.Object); ok {
 		req.Headers = mergeKeyValues(req.Headers, headers)
 	}
-	if query, ok := run.request.Get("query").(*goja.Object); ok {
+	if query, ok := request.Get("query").(*goja.Object); ok {
 		req.Params = mergeKeyValues(req.Params, query)
 	}
-	if body := run.request.Get("body"); body != nil && !goja.IsUndefined(body) && !goja.IsNull(body) {
-		if text := body.String(); text != run.body {
+	if body := request.Get("body"); body != nil && !goja.IsUndefined(body) && !goja.IsNull(body) {
+		if text := body.String(); text != run.api.OriginalBody() {
 			req.BodyType = "raw"
 			req.Raw = text
 			if req.RawType == "" {
@@ -368,15 +231,6 @@ func (run *scriptRun) applyRequest(req *APIRequest) {
 			}
 		}
 	}
-}
-
-// newError makes a JS Error carrying msg, so the page and the script's own
-// try/catch both see the message as written.
-func (run *scriptRun) newError(msg string) goja.Value {
-	if obj, err := run.vm.New(run.vm.Get("Error"), run.vm.ToValue(msg)); err == nil {
-		return obj
-	}
-	return run.vm.NewTypeError(msg)
 }
 
 // initialBody is the body text a script sees in nd.request.body.
@@ -396,19 +250,6 @@ func initialBody(req *APIRequest) string {
 	default: // "none", "formData", "binary" and anything unknown
 		return ""
 	}
-}
-
-// flatObject turns the enabled pairs of list into a plain JS object; a later
-// pair with the same key wins over an earlier one.
-func flatObject(vm *goja.Runtime, list []KeyValue) *goja.Object {
-	obj := vm.NewObject()
-	for _, kv := range list {
-		if kv.Key == "" {
-			continue
-		}
-		_ = obj.Set(kv.Key, kv.Value)
-	}
-	return obj
 }
 
 // mergeKeyValues diffs current against the script's object, case-insensitively:
@@ -509,14 +350,6 @@ func stringField(v goja.Value) string {
 	return v.String()
 }
 
-// valueText stringifies a value a script stores in a variable.
-func valueText(v goja.Value) string {
-	if v == nil {
-		return ""
-	}
-	return v.String()
-}
-
 // scriptFailure turns a goja error into the message the page shows.
 func scriptFailure(kind string, err error) error {
 	var interrupted *goja.InterruptedError
@@ -528,18 +361,9 @@ func scriptFailure(kind string, err error) error {
 	}
 	var thrown *goja.Exception
 	if errors.As(err, &thrown) {
-		return fmt.Errorf("%s出错：%s", kind, scriptErrorText(thrown))
+		return fmt.Errorf("%s出错：%s", kind, ndapi.ScriptErrorText(thrown))
 	}
 	return fmt.Errorf("%s出错：%v", kind, err)
-}
-
-// scriptErrorText is an exception's message, without the Go wrapping.
-func scriptErrorText(err error) string {
-	var thrown *goja.Exception
-	if errors.As(err, &thrown) {
-		return strings.TrimSpace(thrown.Error())
-	}
-	return strings.TrimSpace(err.Error())
 }
 
 // panicError turns a recovered panic value into an error.

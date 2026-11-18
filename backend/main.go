@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	// Embedded IANA time zone data: user machines have no GOROOT zoneinfo,
+	// and nd.time.format/parse need named zones there.
+	_ "time/tzdata"
 
 	"github.com/egoist/mygo"
 )
