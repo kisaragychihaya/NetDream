@@ -19,7 +19,7 @@ func main() {
 	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{})
 
 	mygo.App.WhenReady(func() {
-		mygo.NewWindow(mygo.WindowOptions{
+		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:           windowTitle,
 			Width:           windowWidth,
 			Height:          windowHeight,
@@ -32,6 +32,9 @@ func main() {
 			// embedded by `mygo build` otherwise (see mygo.config.ts).
 			URL: "/",
 		})
+		// 激活 mygo 原生文件拖放的路径投递（需至少一个 Go 侧监听器）；
+		// 路径经 mygo:file-drop 页面事件由前端 mygo-runtime 的 onFileDrop 接收。
+		win.OnFileDrop(func(*mygo.FileDropEvent) {})
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

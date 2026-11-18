@@ -234,15 +234,16 @@ export const RequestService = {
  */
 export const WorkspaceService = {
   /**
-   * Import parses .band bytes the page read from a dropped file; a dropped
-   * file has no path here, so saving it later goes through SaveAs.
-   */
-  import: bind<[string], WorkspaceData>("WorkspaceService.Import", (data: string) => [data]),
-  /**
    * Open asks for a .band file and returns the workspace in it, or a zero
    * WorkspaceFile when the user cancels the dialog.
    */
   open: bind<[], WorkspaceFile>("WorkspaceService.Open", () => []),
+  /**
+   * OpenPath reads the .band workspace at path, which the page got from a
+   * dropped file rather than the dialog: the path is known, so Save writes the
+   * workspace back to it.
+   */
+  openPath: bind<[string], WorkspaceFile>("WorkspaceService.OpenPath", (path: string) => [path]),
   /** Save writes data over the workspace at path. */
   save: bind<[string, WorkspaceData], void>("WorkspaceService.Save", (path: string, data: WorkspaceData) => [path, data]),
   /**

@@ -1,4 +1,4 @@
-import { Channel } from "mygo-runtime";
+import { Channel, onFileDrop } from "mygo-runtime";
 import { runAssertions } from "./assert";
 import { mountAssertionsPanel } from "./components/assertionsPanel";
 import { mountAuthEditor } from "./components/authEditor";
@@ -210,13 +210,17 @@ async function openWorkspace(): Promise<void> {
   }
 }
 
-// 拖入的 .band：字节经 IPC 导入。webview 拿不到拖入文件的路径，
-// 所以 path 置空——之后点「保存」会走另存为，让用户选落盘位置。
-async function importDroppedBand(base64: string): Promise<void> {
+// 拖入的 .band：mygo 原生拖放投递绝对路径，按路径读盘，「保存」直接写回原文件。
+async function openDroppedWorkspace(paths: string[]): Promise<void> {
+  const path = paths.find((item) => item.toLowerCase().endsWith(".band"));
+  if (path === undefined) {
+    reportWorkspaceError(new Error("拖入的不是 .band 工作区文件"));
+    return;
+  }
   try {
-    const data = await WorkspaceService.import(base64);
+    const file = await WorkspaceService.openPath(path);
     clearWorkspaceError();
-    loadWorkspace({ path: "", data });
+    loadWorkspace(file);
   } catch (error) {
     reportWorkspaceError(error);
   }
@@ -383,6 +387,11 @@ subscribeSocket(() => {
   if (request.kind === session.kind && request.url.trim() === session.url) rememberCurrentRequest();
 });
 
+// 拖入 .band 由原生层接管，页面不消费 DOM drop 事件：订阅一次拿绝对路径。
+onFileDrop((drop) => {
+  void openDroppedWorkspace(drop.paths);
+});
+
 mountWorkspaceSidebar(sidebar, {
   open: () => void openWorkspace(),
   save: () => void saveWorkspace(false),
@@ -392,8 +401,4 @@ mountWorkspaceSidebar(sidebar, {
   remove: (id) => deleteEntry(id),
   rename: (id, name) => renameEntry(id, name),
   renameWorkspace: (name) => renameWorkspace(name),
-  importBand: (payload) => {
-    if ("error" in payload) reportWorkspaceError(new Error(payload.error));
-    else void importDroppedBand(payload.base64);
-  },
 });

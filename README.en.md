@@ -14,7 +14,7 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
 - **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy
 - **Assertions panel**: status code, contains / not-contains, response time
-- **Workspaces (.band)**: a zip archive with one file per request; open / save / save-as / drag-and-drop import; executing a request registers it in the in-memory workspace automatically (success or failure), editing method / URL and re-executing forks a new entry, custom names stick
+- **Workspaces (.band)**: a zip archive with one file per request; open / save / save-as; drop a `.band` file **anywhere on the window** to open it (native file drop hands over the real path, so saving writes back to the original file); executing a request registers it in the in-memory workspace automatically (success or failure), editing method / URL and re-executing forks a new entry, custom names stick
 - **Auto-save**: registering on connect, refreshed on disconnect; saving writes the whole in-memory workspace to disk
 
 ## Tech stack
@@ -64,7 +64,6 @@ Bump `version` in `mygo.config.ts` to match the tag before releasing.
 - Workspace path is not remembered across restarts; no search / sorting in the list yet
 - Pre-request / post-request script tabs are placeholders
 - form-data supports text fields only (no file uploads)
-- A drag-and-dropped workspace saves via "Save As" (the webview cannot see the dropped file's path)
 
 ## License
 

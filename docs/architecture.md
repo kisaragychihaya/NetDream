@@ -7,13 +7,13 @@
 
 ```
 backend/
-  main.go              # main()：Bind + 窗口（窗口常量）
+  main.go              # main()：Bind + 窗口（窗口常量）+ OnFileDrop 激活（拖入文件拿路径）
   types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send、PickFile（仅有的两个导出方法）
   request.go           # 未导出 helper：URL/Body 构造、头与 Cookie、响应整形、截断、h2c 传输
   sse.go               # SSE：Content-Type 判定、Open/Event 推送、事件流解析器
   socket.go            # SocketService：Connect/Send/Disconnect + 连接注册表 + WS/TCP 读写循环
-  workspace.go         # WorkspaceService：Open/Import/Save/SaveAs + .band（zip）读写
+  workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写
 frontend/
   index.html           # 静态骨架（id 见下）
   src/
@@ -242,9 +242,9 @@ requests/<id>.json      # 每个已保存请求一个文件，JSON（SavedReques
 
 - `Open() (WorkspaceFile, error)` — 打开文件对话框（过滤 `.band`），读 zip 返回
   `{path, data}`；用户取消返回 `WorkspaceFile{}`（Path 为空串，前端据此判取消）。
-- `Import(data []byte) (WorkspaceData, error)` — 解析拖入的 .band 字节
-  （JSON 传输为 base64 字符串）。webview 的 File 拿不到真实路径，
-  所以导入结果**没有 path**，前端保存时转「另存为」。
+- `OpenPath(path string) (WorkspaceFile, error)` — 不经对话框直接读指定
+  `.band` 路径（拖入打开用）；扩展名必须是 `.band`（大小写不敏感），否则报错。
+  与 Open 相同返回 `{path, data}`——**带真实路径，保存直接写回原文件**。
 - `Save(path string, data WorkspaceData) error` — 覆盖写 zip 到 path。
 - `SaveAs(data WorkspaceData) (string, error)` — 保存对话框（默认文件名 `name.band`，
   缺 `.band` 后缀自动补），写 zip 返回实际路径；取消返回 `("", nil)`。
@@ -445,8 +445,13 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。
-- 拖入导入：把 `.band` 文件拖到侧栏任意位置即可打开（dragover 高亮虚线框）；
-  非 `.band` 文件在响应区错误条提示。拖入的工作区 path 为 null，「保存」转「另存为」。
+- 拖入打开：`.band` 文件拖到**窗口任意位置**即可打开。机制是 mygo 原生文件
+  拖放而非 webview 的 File API：`main.go` 在窗口上注册 `Window.OnFileDrop`
+  监听器激活路径投递（至少要有一个 Go 侧监听器，原生层才会接受未被页面消费的
+  文件拖放），前端经 mygo-runtime 的 `onFileDrop` 拿到**绝对路径**后调
+  `WorkspaceService.openPath` 读盘。侧栏保留 dragover 高亮虚线框（只作视觉
+  反馈，不再消费 drop 事件）；非 `.band` 文件在响应区错误条提示；
+  一次拖多个文件取第一个 `.band`。拖入打开带真实路径，「保存」直接写回原文件。
 
 ### 约定
 

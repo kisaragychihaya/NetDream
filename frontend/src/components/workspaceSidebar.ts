@@ -10,8 +10,6 @@ export interface WorkspaceHandlers {
   remove: (id: string) => void;
   rename: (id: string, name: string) => void;
   renameWorkspace: (name: string) => void;
-  /** 拖入 .band：{base64} 是文件内容；{error} 是拦截原因（如后缀不对）。 */
-  importBand: (payload: { base64: string } | { error: string }) => void;
 }
 
 const METHOD_CLASSES: Record<Method, string> = {
@@ -44,41 +42,19 @@ function displayOf(entry: SavedRequest): string {
 export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHandlers): () => void {
   host.textContent = "";
 
-  // 拖入 .band 导入。webview 里 File 拿不到真实路径，所以读字节走 IPC，
-  // 导入的工作区没有 path，保存时自然转「另存为」。
-  host.addEventListener("dragover", (event) => {
+  // 拖入 .band 由 mygo 原生拖放拿路径（main.ts 订阅 onFileDrop），这里只把
+  // 虚线框高亮当作视觉反馈，不再消费 drop 事件。
+  const highlight = (event: DragEvent): void => {
     event.preventDefault();
     host.classList.add("ws-drop");
-  });
+  };
+  host.addEventListener("dragenter", highlight);
+  host.addEventListener("dragover", highlight);
   host.addEventListener("dragleave", (event) => {
     if (event.relatedTarget instanceof Node && host.contains(event.relatedTarget)) return;
     host.classList.remove("ws-drop");
   });
-  host.addEventListener("drop", (event) => {
-    event.preventDefault();
-    host.classList.remove("ws-drop");
-    const file = event.dataTransfer?.files[0];
-    if (file === undefined) return;
-    void importFile(file);
-  });
-
-  const importFile = async (file: File): Promise<void> => {
-    if (!file.name.toLowerCase().endsWith(".band")) {
-      handlers.importBand({ error: `只支持 .band 工作区文件（拖入的是“${file.name}”）` });
-      return;
-    }
-    try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-      });
-      handlers.importBand({ base64: dataUrl.slice(dataUrl.indexOf(",") + 1) });
-    } catch {
-      handlers.importBand({ error: `读取“${file.name}”失败` });
-    }
-  };
+  host.addEventListener("drop", () => host.classList.remove("ws-drop"));
 
   let editing = false;
   let lastStructure = "";

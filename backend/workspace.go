@@ -54,10 +54,22 @@ func (WorkspaceService) Open() (WorkspaceFile, error) {
 	return WorkspaceFile{Path: paths[0], Data: data}, nil
 }
 
-// Import parses .band bytes the page read from a dropped file; a dropped
-// file has no path here, so saving it later goes through SaveAs.
-func (WorkspaceService) Import(data []byte) (WorkspaceData, error) {
-	return readBandBytes(data, "拖入的 .band 文件")
+// OpenPath reads the .band workspace at path, which the page got from a
+// dropped file rather than the dialog: the path is known, so Save writes the
+// workspace back to it.
+func (WorkspaceService) OpenPath(path string) (WorkspaceFile, error) {
+	if strings.TrimSpace(path) == "" {
+		return WorkspaceFile{}, fmt.Errorf("opening a dropped workspace needs a path")
+	}
+	if !strings.EqualFold(filepath.Ext(path), bandExt) {
+		return WorkspaceFile{}, fmt.Errorf("%s is not a %s workspace", filepath.Base(path), bandExt)
+	}
+
+	data, err := readBand(path)
+	if err != nil {
+		return WorkspaceFile{}, err
+	}
+	return WorkspaceFile{Path: path, Data: data}, nil
 }
 
 // Save writes data over the workspace at path.
@@ -99,8 +111,7 @@ func readBand(path string) (WorkspaceData, error) {
 	return readBandBytes(body, filepath.Base(path))
 }
 
-// readBandBytes parses a .band archive, whether it came from a file or a
-// dropped byte buffer: name is what errors call it.
+// readBandBytes parses the .band archive in body: name is what errors call it.
 func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
