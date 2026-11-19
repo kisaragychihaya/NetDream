@@ -19,7 +19,7 @@ const (
 )
 
 func main() {
-	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{})
+	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, AppService{})
 
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{

@@ -7,6 +7,7 @@ import { mountConfirmDialog } from "./components/closeConfirm";
 import { mountKVTable } from "./components/kvTable";
 import { mountResponseView } from "./components/responseView";
 import { mountScriptEditor } from "./components/scriptEditor";
+import { mountSettings } from "./components/settings";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
 import { mountSocketPanel } from "./components/socketPanel";
 import { createTabs, type TabDef } from "./components/tabs";
@@ -526,6 +527,8 @@ onFileDrop((drop) => {
   void openDroppedWorkspace(drop.paths);
 });
 
+const settingsDialog = mountSettings();
+
 mountWorkspaceSidebar(sidebar, {
   open: () => void openWorkspace(),
   save: () => void saveWorkspace(false),
@@ -536,6 +539,7 @@ mountWorkspaceSidebar(sidebar, {
   remove: (id) => deleteEntry(id),
   rename: (id, name) => renameEntry(id, name),
   renameWorkspace: (name) => renameWorkspace(name),
+  openSettings: () => settingsDialog.open(),
 });
 
 function closeWindow(): void {

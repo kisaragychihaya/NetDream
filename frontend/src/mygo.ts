@@ -332,6 +332,20 @@ export const SocketService = {
   send: bind<[SocketSendParams], void>("SocketService.Send", (params: SocketSendParams) => [params]),
 } as const;
 
+/**
+ * AppService 暴露应用自身的信息与桌面集成能力。
+ * Every exported method here is bound to the frontend, so helpers stay unexported.
+ */
+export const AppService = {
+  /**
+   * OpenURL 用系统默认应用打开 URL：设置页「关于」里的 GitHub 主页链接
+   * 经它在用户的外部浏览器里打开，而不是应用内 webview。
+   */
+  openURL: bind<[string], void>("AppService.OpenURL", (url: string) => [url]),
+  /** Version 返回应用版本号（来自打包信息，即 mygo.config.ts 里的 version）。 */
+  version: bind<[], string>("AppService.Version", () => []),
+} as const;
+
 // ---- Events ----
 
 /** Events sent by the Go side. Subscribe with `events.name.on(listener)`. */
