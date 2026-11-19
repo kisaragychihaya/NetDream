@@ -160,7 +160,11 @@ func (c *socketConn) dialWebSocket(ctx context.Context, params SocketConnectPara
 		header.Add(h.Key, h.Value)
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: socketDialTimeout}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: socketDialTimeout,
+		// 环境变量优先、系统代理兜底，与 HTTP 请求同一套规则。
+		Proxy: proxyForRequest,
+	}
 	if protocols := socketProtocols(params.Protocol); len(protocols) > 0 {
 		// The dialer writes this header itself, and refuses a copy of it.
 		header.Del("Sec-WebSocket-Protocol")

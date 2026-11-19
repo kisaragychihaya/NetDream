@@ -136,7 +136,7 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 	})
 	defer expire.Stop()
 
-	client := new(http.Client)
+	client := &http.Client{Transport: proxiedTransport()}
 	if req.HTTP2 && target.Scheme == "http" {
 		client.Transport = h2cTransport()
 	}

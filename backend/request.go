@@ -72,6 +72,12 @@ func h2cTransport() *http2.Transport {
 	return &http2.Transport{
 		AllowHTTP: true,
 		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
+			// 配了 http(s) 代理（环境变量或系统代理）时先 CONNECT 开隧道，
+			// 再在隧道里讲 h2c；socks 代理没有 CONNECT 语义，保持直连。
+			if proxy := proxyForSchemeHost("http", addr); proxy != nil &&
+				(proxy.Scheme == "http" || proxy.Scheme == "https") {
+				return dialViaProxy(network, proxy, addr)
+			}
 			return net.DialTimeout(network, addr, defaultTimeout)
 		},
 	}
