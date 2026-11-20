@@ -1,10 +1,12 @@
 import {
   ASSERTION_TYPES,
-  assertionTypeOption,
+  assertionLabel,
+  assertionPlaceholder,
   createAssertionRule,
   type AssertionResult,
   type AssertionRule,
 } from "../assert";
+import { onLangChange, t } from "../i18n";
 import type { ScriptTest } from "../mygo";
 import { getRequest, getResponse, subscribe, updateRequest, updateResponse } from "../state";
 
@@ -18,7 +20,8 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
   header.className = "assert-header";
   header.setAttribute("aria-expanded", "true");
   const title = document.createElement("span");
-  title.textContent = "断言与校验";
+  title.textContent = t("assert.title");
+  title.dataset.i18n = "assert.title";
   const chevron = document.createElement("span");
   chevron.className = "chevron";
   chevron.textContent = "▾";
@@ -38,7 +41,7 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
   const addButton = document.createElement("button");
   addButton.type = "button";
   addButton.className = "add-row";
-  addButton.textContent = "+ 添加断言";
+  addButton.textContent = t("assert.add");
 
   const testsHost = document.createElement("div");
   testsHost.className = "script-tests";
@@ -66,18 +69,18 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     const enabled = document.createElement("input");
     enabled.type = "checkbox";
     enabled.checked = rule.enabled;
-    enabled.title = "启用";
+    enabled.title = t("common.enabled");
     enabled.addEventListener("change", () => {
       rule.enabled = enabled.checked;
       commitRules();
     });
 
     const select = document.createElement("select");
-    select.setAttribute("aria-label", "断言类型");
+    select.setAttribute("aria-label", t("assert.type"));
     for (const option of ASSERTION_TYPES) {
       const item = document.createElement("option");
-      item.value = option.type;
-      item.textContent = option.label;
+      item.value = option;
+      item.textContent = assertionLabel(option);
       select.append(item);
     }
     select.value = rule.type;
@@ -87,7 +90,7 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     value.className = "assert-value";
     value.spellcheck = false;
     value.autocomplete = "off";
-    value.placeholder = assertionTypeOption(rule.type).placeholder;
+    value.placeholder = assertionPlaceholder(rule.type);
     value.value = rule.value;
     value.addEventListener("input", () => {
       rule.value = value.value;
@@ -95,17 +98,17 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     });
 
     select.addEventListener("change", () => {
-      const next = ASSERTION_TYPES.find((option) => option.type === select.value);
+      const next = ASSERTION_TYPES.find((option) => option === select.value);
       if (!next) return;
-      rule.type = next.type;
-      value.placeholder = next.placeholder;
+      rule.type = next;
+      value.placeholder = assertionPlaceholder(next);
       commitRules();
     });
 
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "icon-btn";
-    remove.title = "删除";
+    remove.title = t("common.delete");
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       updateRequest((state) => {
@@ -132,7 +135,7 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     if (rules.length === 0) {
       const empty = document.createElement("p");
       empty.className = "assert-empty";
-      empty.textContent = "还没有断言，点击下方按钮添加。";
+      empty.textContent = t("assert.empty");
       rulesHost.append(empty);
       return;
     }
@@ -164,30 +167,30 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
         mark.textContent = result.pass ? "✓" : "✗";
         const actual = document.createElement("span");
         actual.className = "assert-actual";
-        actual.textContent = result.actual;
+        actual.textContent = t(result.actual.key, result.actual.vars);
         slot.append(mark, actual);
       } else if (enabledById.get(id) === false) {
         slot.classList.add("muted");
-        slot.textContent = "已禁用";
+        slot.textContent = t("common.disabled");
       }
     }
 
     if (results.length > 0) {
       const passed = results.filter((result) => result.pass).length;
-      summary.textContent = `通过 ${passed} / ${results.length}`;
+      summary.textContent = t("assert.summary", { passed, total: results.length });
       summary.className = passed === results.length ? "assert-summary pass" : "assert-summary fail";
       return;
     }
 
     summary.className = "assert-summary";
     if (sending) {
-      summary.textContent = "等待响应…";
+      summary.textContent = t("assert.waiting");
     } else if (error) {
-      summary.textContent = "请求失败，断言未执行";
+      summary.textContent = t("assert.requestFailed");
     } else if (response) {
-      summary.textContent = rules.some((rule) => rule.enabled) ? "断言未执行" : "没有启用的断言";
+      summary.textContent = rules.some((rule) => rule.enabled) ? t("assert.notRun") : t("assert.noEnabled");
     } else {
-      summary.textContent = "发送请求后显示结果";
+      summary.textContent = t("assert.emptySummary");
     }
   }
 
@@ -200,7 +203,7 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     const title = document.createElement("div");
     title.className = "script-tests-title";
     const passed = tests.filter((test) => test.pass).length;
-    title.textContent = `脚本测试 ${passed} / ${tests.length}`;
+    title.textContent = t("assert.scriptTests", { passed, total: tests.length });
     testsHost.append(title);
 
     for (const test of tests) testsHost.append(scriptTestRow(test));
@@ -258,9 +261,17 @@ export function mountAssertionsPanel(host: HTMLElement): () => void {
     renderResults();
     renderScriptTests();
   });
+  // 语言切换：规则行、结果与脚本测试都带词典文案，整体重算。
+  const unsubscribeLang = onLangChange(() => {
+    addButton.textContent = t("assert.add");
+    renderRules();
+    renderResults();
+    renderScriptTests();
+  });
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     host.classList.remove("collapsed");
     host.textContent = "";
   };

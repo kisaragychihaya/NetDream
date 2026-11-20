@@ -1,3 +1,4 @@
+import { onLangChange, t } from "../i18n";
 import {
   BODY_TYPES,
   emptyFormRow,
@@ -29,12 +30,16 @@ const RAW_LABELS: Record<RawType, string> = {
   html: "HTML",
 };
 
-const RAW_PLACEHOLDERS: Record<RawType, string> = {
+// 示例标记（JSON/XML/HTML）不随语言变；纯文本请求体的占位符来自词典。
+const RAW_PLACEHOLDERS: Partial<Record<RawType, string>> = {
   json: '{\n  "hello": "world"\n}',
-  text: "纯文本请求体",
   xml: "<note>\n  <to>NetDream</to>\n</note>",
   html: "<h1>Hello</h1>",
 };
+
+function rawPlaceholder(type: RawType): string {
+  return RAW_PLACEHOLDERS[type] ?? t("body.rawTextPlaceholder");
+}
 
 // form-data 文件字段的「选择」与 binary 共用同一个原生对话框：拿到非空路径就
 // 写回对应行；取消（空串）什么都不做。拖入的路径由 main.ts 的 onFileDrop 走同一条写回。
@@ -97,7 +102,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
       case "none": {
         const hint = document.createElement("p");
         hint.className = "hint";
-        hint.textContent = "该请求不包含请求体。";
+        hint.textContent = t("body.noneHint");
         panel.append(hint);
         break;
       }
@@ -114,13 +119,13 @@ export function mountBodyEditor(host: HTMLElement): () => void {
               value.formData = value.formData.filter((_, position) => position !== index);
             });
           },
-          addLabel: "+ 添加字段",
+          addLabel: () => t("body.addField"),
           withContentType: true,
           withFileKind: true,
           pickFile: (index) => {
             void pickFormFile(index);
           },
-          hint: "以 multipart/form-data 发送；「内容类型」留空时使用默认值；文件字段发送时读取所选文件。",
+          hint: () => t("body.formDataHint"),
         });
         break;
       }
@@ -137,8 +142,8 @@ export function mountBodyEditor(host: HTMLElement): () => void {
               value.urlEncoded = value.urlEncoded.filter((_, position) => position !== index);
             });
           },
-          addLabel: "+ 添加字段",
-          hint: "以 application/x-www-form-urlencoded 发送。",
+          addLabel: () => t("body.addField"),
+          hint: () => t("body.urlencodedHint"),
         });
         break;
       }
@@ -147,7 +152,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
         bar.className = "raw-bar";
 
         const select = document.createElement("select");
-        select.setAttribute("aria-label", "请求体类型");
+        select.setAttribute("aria-label", t("body.rawType"));
         for (const rawType of RAW_TYPES) {
           const option = document.createElement("option");
           option.value = rawType;
@@ -160,7 +165,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
         area.className = "raw-area";
         area.spellcheck = false;
         area.value = state.raw;
-        area.placeholder = RAW_PLACEHOLDERS[state.rawType];
+        area.placeholder = rawPlaceholder(state.rawType);
         area.addEventListener("input", () => {
           updateRequest((value) => {
             value.raw = area.value;
@@ -179,7 +184,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
           const current = getRequest();
           if (select.value !== current.rawType) select.value = current.rawType;
           if (area.value !== current.raw) area.value = current.raw;
-          area.placeholder = RAW_PLACEHOLDERS[current.rawType];
+          area.placeholder = rawPlaceholder(current.rawType);
         };
 
         bar.append(select);
@@ -192,7 +197,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
 
         const pick = document.createElement("button");
         pick.type = "button";
-        pick.textContent = "选择文件";
+        pick.textContent = t("common.chooseFile");
 
         const path = document.createElement("span");
         path.className = "binary-path";
@@ -203,7 +208,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
 
         syncBinary = () => {
           const current = getRequest().binaryPath;
-          path.textContent = current || "未选择文件";
+          path.textContent = current || t("common.noFile");
           path.classList.toggle("empty", current === "");
           path.title = current;
         };
@@ -232,7 +237,7 @@ export function mountBodyEditor(host: HTMLElement): () => void {
 
         const note = document.createElement("p");
         note.className = "hint";
-        note.textContent = "读取该文件作为请求体（最大 100MB）；未显式设置 Content-Type 时使用 application/octet-stream。";
+        note.textContent = t("body.binaryHint");
 
         panel.append(box, error, note);
         break;
@@ -252,9 +257,12 @@ export function mountBodyEditor(host: HTMLElement): () => void {
 
   sync();
   const unsubscribe = subscribe(sync);
+  // 语言切换：整块面板按当前语言重画（值都在请求态里，不丢内容）。
+  const unsubscribeLang = onLangChange(() => renderPanel());
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     disposeChild?.();
     disposeChild = null;
     host.textContent = "";

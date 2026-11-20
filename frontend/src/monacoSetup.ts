@@ -1,6 +1,7 @@
 import * as monaco from "monaco-editor";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import TypeScriptWorker from "monaco-editor/language/typescript/ts.worker.js?worker";
+import { getEffectiveTheme, onThemeChange } from "./theme";
 
 // 补全与悬浮文档的数据源：在后端 goja 里运行时的同名 API（见 docs/architecture.md）。
 const ND_API_DTS = `
@@ -276,5 +277,18 @@ typescript.javascriptDefaults.setCompilerOptions({
   noEmit: true,
 });
 typescript.javascriptDefaults.addExtraLib(ND_API_DTS, "netdream-nd.d.ts");
+
+/**
+ * 编辑器主题跟着界面主题走：Monaco 画在 canvas 上，CSS 变量管不到它，
+ * 跟随系统时系统配色一变必须手动换。
+ */
+export function monacoTheme(): "vs" | "vs-dark" {
+  return getEffectiveTheme() === "dark" ? "vs-dark" : "vs";
+}
+
+// 已经创建的编辑器实例由 monaco.editor.setTheme 统一切换。
+onThemeChange(() => {
+  monaco.editor.setTheme(monacoTheme());
+});
 
 export { monaco };

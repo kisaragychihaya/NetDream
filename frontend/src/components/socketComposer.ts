@@ -1,3 +1,4 @@
+import { onLangChange, t } from "../i18n";
 import type { SavedMessage } from "../mygo";
 import { getSocketSession, sendSocketMessage, subscribeSocket, type SocketStatus } from "../socket";
 import { getRequest, subscribe, updateRequest, type MessageType } from "../state";
@@ -10,14 +11,14 @@ const MESSAGE_TYPES: { value: MessageType; label: string }[] = [
   { value: "binary", label: "Binary" },
 ];
 
-const BINARY_PLACEHOLDER = "粘贴 base64 编码的二进制内容，例如 SGVsbG8=";
-const TEXT_PLACEHOLDER = "输入要发送的消息内容";
+const BINARY_PLACEHOLDER = "socket.binaryPlaceholder";
+const TEXT_PLACEHOLDER = "socket.textPlaceholder";
 
 const STATUS_NOTES: Record<SocketStatus, string> = {
-  idle: "未连接",
-  connecting: "连接中…",
+  idle: "socket.idle",
+  connecting: "socket.connecting",
   open: "",
-  closed: "已断开",
+  closed: "socket.closed",
 };
 
 interface Draft {
@@ -80,10 +81,10 @@ export function mountSocketComposer(host: HTMLElement): () => void {
 
   const side = el("aside", "sock-tpl");
   const sideHead = el("div", "sock-tpl-head");
-  sideHead.append(el("span", "sock-tpl-title", "消息模板"));
-  const addButton = el("button", "sock-tpl-add", "+ 新增");
+  const sideTitle = el("span", "sock-tpl-title", t("socket.templates"));
+  sideHead.append(sideTitle);  const addButton = el("button", "sock-tpl-add", t("socket.addTemplate"));
   addButton.type = "button";
-  addButton.title = "把编辑器里的内容存成消息模板";
+  addButton.title = t("socket.addTemplateTitle");
   sideHead.append(addButton);
   const listHost = el("div", "sock-tpl-list");
   side.append(sideHead, listHost);
@@ -95,10 +96,10 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   nameInput.className = "sock-name";
   nameInput.spellcheck = false;
   nameInput.autocomplete = "off";
-  nameInput.placeholder = "消息名称（可留空自动命名）";
+  nameInput.placeholder = t("socket.namePlaceholder");
   const typeSelect = document.createElement("select");
   typeSelect.className = "sock-type";
-  typeSelect.setAttribute("aria-label", "消息类型");
+  typeSelect.setAttribute("aria-label", t("socket.msgType"));
   for (const option of MESSAGE_TYPES) {
     const node = document.createElement("option");
     node.value = option.value;
@@ -113,11 +114,11 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   payload.autocomplete = "off";
 
   const actions = el("div", "sock-actions");
-  const sendButton = el("button", "sock-send", "发送");
+  const sendButton = el("button", "sock-send", t("common.send"));
   sendButton.type = "button";
-  const storeButton = el("button", "sock-store", "存为消息");
+  const storeButton = el("button", "sock-store", t("socket.store"));
   storeButton.type = "button";
-  storeButton.title = "保存编辑器内容：选中模板时覆盖它，否则新建模板";
+  storeButton.title = t("socket.storeTitle");
   const note = el("span", "sock-note");
   actions.append(sendButton, storeButton, note);
 
@@ -129,7 +130,7 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     if (nameInput.value !== draft.name) nameInput.value = draft.name;
     if (typeSelect.value !== draft.msgType) typeSelect.value = draft.msgType;
     if (payload.value !== draft.payload) payload.value = draft.payload;
-    const placeholder = draft.msgType === "binary" ? BINARY_PLACEHOLDER : TEXT_PLACEHOLDER;
+    const placeholder = draft.msgType === "binary" ? t(BINARY_PLACEHOLDER) : t(TEXT_PLACEHOLDER);
     if (payload.placeholder !== placeholder) payload.placeholder = placeholder;
   };
 
@@ -137,8 +138,9 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     const status = getSocketSession().status;
     const live = status === "open";
     sendButton.disabled = !live;
-    sendButton.title = live ? "发送当前编辑器内容" : "连接建立后才能发送";
-    note.textContent = STATUS_NOTES[status];
+    sendButton.title = live ? t("socket.sendTitle") : t("socket.sendDisabled");
+    const noteKey = STATUS_NOTES[status];
+    note.textContent = noteKey === "" ? "" : t(noteKey);
     note.dataset.state = status;
   };
 
@@ -146,18 +148,18 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     const messages = getRequest().messages;
     listHost.textContent = "";
     if (messages.length === 0) {
-      listHost.append(el("p", "sock-tpl-empty", "还没有消息模板：填好内容点「+ 新增」保存"));
+      listHost.append(el("p", "sock-tpl-empty", t("socket.noTemplates")));
       return;
     }
     for (const message of messages) {
       const row = el("div", message.id === selectedId ? "sock-tpl-row active" : "sock-tpl-row");
       row.dataset.id = message.id;
-      row.title = "点击载入编辑器";
-      const name = el("span", "sock-tpl-name", message.name.trim() === "" ? "未命名消息" : message.name);
+      row.title = t("socket.loadTitle");
+      const name = el("span", "sock-tpl-name", message.name.trim() === "" ? t("socket.untitled") : message.name);
       const tag = el("span", "sock-tpl-type", typeLabel(messageType(message.msgType)));
       const remove = el("button", "sock-tpl-del", "×");
       remove.type = "button";
-      remove.title = "删除消息模板";
+      remove.title = t("socket.deleteTitle");
 
       row.addEventListener("click", () => {
         // 双击改名时两次 click 会先经过这里：只切高亮，不重建列表，
@@ -180,7 +182,15 @@ export function mountSocketComposer(host: HTMLElement): () => void {
         event.stopPropagation();
         const live = getRequest().messages.find((item) => item.id === message.id);
         if (live === undefined) return;
-        if (!window.confirm(`删除消息模板“${live.name.trim() === "" ? "未命名消息" : live.name}”？`)) return;
+        if (
+          !window.confirm(
+            t("socket.deleteConfirm", {
+              name: live.name.trim() === "" ? t("socket.untitled") : live.name,
+            }),
+          )
+        ) {
+          return;
+        }
         if (selectedId === message.id) {
           selectedId = null;
           draft = emptyDraft();
@@ -223,7 +233,7 @@ export function mountSocketComposer(host: HTMLElement): () => void {
       editing = false;
       const next = input.value.trim();
       const accepted = commit && next !== "";
-      anchor.textContent = accepted ? next : value.trim() === "" ? "未命名消息" : value;
+      anchor.textContent = accepted ? next : value.trim() === "" ? t("socket.untitled") : value;
       input.replaceWith(anchor);
       if (!accepted || next === value) return;
       if (selectedId === id) {
@@ -251,7 +261,7 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   const storeDraft = (forceNew: boolean): void => {
     const target = forceNew ? null : selectedId;
     const id = target ?? newMessageId();
-    const name = draft.name.trim() === "" ? `${typeLabel(draft.msgType)} 消息` : draft.name.trim();
+    const name = draft.name.trim() === "" ? t("socket.defaultName", { type: typeLabel(draft.msgType) }) : draft.name.trim();
     draft.name = name;
     const message: SavedMessage = { id, name, msgType: draft.msgType, payload: draft.payload };
     selectedId = id;
@@ -323,10 +333,25 @@ export function mountSocketComposer(host: HTMLElement): () => void {
 
   const unsubscribeState = subscribe(sync);
   const unsubscribeSocket = subscribeSocket(sync);
+  // 语言切换：静态标签、按钮与占位符重取；行内改名时不重画列表，免受输入框被换掉。
+  const unsubscribeLang = onLangChange(() => {
+    sideTitle.textContent = t("socket.templates");
+    addButton.textContent = t("socket.addTemplate");
+    addButton.title = t("socket.addTemplateTitle");
+    nameInput.placeholder = t("socket.namePlaceholder");
+    typeSelect.setAttribute("aria-label", t("socket.msgType"));
+    sendButton.textContent = t("common.send");
+    storeButton.textContent = t("socket.store");
+    storeButton.title = t("socket.storeTitle");
+    applyDraft();
+    syncSend();
+    if (!editing) drawList();
+  });
 
   return () => {
     unsubscribeState();
     unsubscribeSocket();
+    unsubscribeLang();
     host.textContent = "";
   };
 }
@@ -337,15 +362,16 @@ export function mountSocketSettings(host: HTMLElement): () => void {
 
   const root = el("div", "sock-settings");
   const field = el("label", "field");
-  field.append(el("span", "", "子协议（Sec-WebSocket-Protocol）"));
+  const fieldLabel = el("span", "", t("socket.protocolLabel"));
+  field.append(fieldLabel);
   const input = document.createElement("input");
   input.type = "text";
   input.spellcheck = false;
   input.autocomplete = "off";
-  input.placeholder = "如 graphql-ws, json";
+  input.placeholder = t("socket.protocolPlaceholder");
   input.value = getRequest().socketProtocol;
   field.append(input);
-  const hint = el("p", "hint", "逗号分隔多个子协议，握手时按顺序协商；TCP 连接不使用。");
+  const hint = el("p", "hint", t("socket.protocolHint"));
   root.append(field, hint);
   host.append(root);
 
@@ -362,9 +388,16 @@ export function mountSocketSettings(host: HTMLElement): () => void {
     requestRef = request;
     if (input.value !== request.socketProtocol) input.value = request.socketProtocol;
   });
+  // 语言切换：标签、占位符与说明重取（输入值是用户数据，保持原样）。
+  const unsubscribeLang = onLangChange(() => {
+    fieldLabel.textContent = t("socket.protocolLabel");
+    input.placeholder = t("socket.protocolPlaceholder");
+    hint.textContent = t("socket.protocolHint");
+  });
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     host.textContent = "";
   };
 }

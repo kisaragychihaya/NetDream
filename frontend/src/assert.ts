@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import type { APIResponse } from "./mygo";
 
 export type AssertionType = "statusEquals" | "bodyContains" | "bodyNotContains" | "responseTimeLt";
@@ -9,32 +10,48 @@ export interface AssertionRule {
   value: string;
 }
 
+/** 结果文案的词典键与插值变量：存结构而不是成品文案，切语言时按当前语言现取。 */
+export interface AssertionActual {
+  key: string;
+  vars?: Record<string, string | number>;
+}
+
 export interface AssertionResult {
   rule: AssertionRule;
   pass: boolean;
-  actual: string;
+  actual: AssertionActual;
 }
 
-export interface AssertionTypeOption {
-  type: AssertionType;
-  label: string;
-  placeholder: string;
-}
-
-export const ASSERTION_TYPES: readonly AssertionTypeOption[] = [
-  { type: "statusEquals", label: "状态码等于", placeholder: "200" },
-  { type: "bodyContains", label: "响应体包含", placeholder: "关键词" },
-  { type: "bodyNotContains", label: "响应体不包含", placeholder: "关键词" },
-  { type: "responseTimeLt", label: "响应时间小于(ms)", placeholder: "1000" },
+export const ASSERTION_TYPES: readonly AssertionType[] = [
+  "statusEquals",
+  "bodyContains",
+  "bodyNotContains",
+  "responseTimeLt",
 ];
 
-export const ASSERTION_TYPE_IDS: readonly AssertionType[] = ASSERTION_TYPES.map((option) => option.type);
+export const ASSERTION_TYPE_IDS: readonly AssertionType[] = ASSERTION_TYPES;
 
-export function assertionTypeOption(type: AssertionType): AssertionTypeOption {
-  for (const option of ASSERTION_TYPES) {
-    if (option.type === type) return option;
+const ASSERTION_LABEL_KEYS: Record<AssertionType, string> = {
+  statusEquals: "assert.statusEquals",
+  bodyContains: "assert.bodyContains",
+  bodyNotContains: "assert.bodyNotContains",
+  responseTimeLt: "assert.responseTimeLt",
+};
+
+export function assertionLabel(type: AssertionType): string {
+  return t(ASSERTION_LABEL_KEYS[type]);
+}
+
+export function assertionPlaceholder(type: AssertionType): string {
+  switch (type) {
+    case "statusEquals":
+      return "200";
+    case "bodyContains":
+    case "bodyNotContains":
+      return t("assert.keywordPlaceholder");
+    default:
+      return "1000";
   }
-  return { type, label: type, placeholder: "" };
 }
 
 let idSequence = 0;
@@ -65,12 +82,12 @@ function runRule(rule: AssertionRule, res: APIResponse): AssertionResult {
     case "statusEquals": {
       const expected = Number(rule.value);
       if (!Number.isFinite(expected)) {
-        return { rule, pass: false, actual: `期望值格式错误：${rule.value}` };
+        return { rule, pass: false, actual: { key: "assert.actualBadExpected", vars: { value: rule.value } } };
       }
       return {
         rule,
         pass: res.status === expected,
-        actual: `实际状态码 ${res.status}`,
+        actual: { key: "assert.actualStatus", vars: { status: res.status } },
       };
     }
     case "bodyContains": {
@@ -78,7 +95,10 @@ function runRule(rule: AssertionRule, res: APIResponse): AssertionResult {
       return {
         rule,
         pass: found,
-        actual: found ? `响应体包含「${rule.value}」` : `响应体不包含「${rule.value}」`,
+        actual: {
+          key: found ? "assert.actualContains" : "assert.actualNotContains",
+          vars: { value: rule.value },
+        },
       };
     }
     case "bodyNotContains": {
@@ -86,21 +106,24 @@ function runRule(rule: AssertionRule, res: APIResponse): AssertionResult {
       return {
         rule,
         pass: !found,
-        actual: found ? `响应体包含「${rule.value}」` : `响应体不包含「${rule.value}」`,
+        actual: {
+          key: found ? "assert.actualContains" : "assert.actualNotContains",
+          vars: { value: rule.value },
+        },
       };
     }
     case "responseTimeLt": {
       const expected = Number(rule.value);
       if (!Number.isFinite(expected)) {
-        return { rule, pass: false, actual: `期望值格式错误：${rule.value}` };
+        return { rule, pass: false, actual: { key: "assert.actualBadExpected", vars: { value: rule.value } } };
       }
       return {
         rule,
         pass: res.timeMS < expected,
-        actual: `实际耗时 ${res.timeMS} ms`,
+        actual: { key: "assert.actualTime", vars: { ms: res.timeMS } },
       };
     }
     default:
-      return { rule, pass: false, actual: "未知的断言类型" };
+      return { rule, pass: false, actual: { key: "assert.actualUnknown" } };
   }
 }

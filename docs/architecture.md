@@ -575,11 +575,50 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   `RequestService.pickFile()` 选盘），容器带 `data-file-drop-index` 与 dragover
   高亮（纯视觉反馈）。`FormRow` 带 `kind/filePath`，随 .band 持久化（旧数据按文本行读）。
 
+### 多语言（src/i18n/）
+
+- 词典 `src/i18n/locales/{zh-CN,en-US,ja}.json`：嵌套 JSON、点路径键、`{{var}}`
+  插值；zh-CN 是兜底语言，缺键先回退 zh-CN 再回退键名（便于发现漏键）。
+- `t(key, vars?)` 用**生效语言**；`getLang()` 生效语言，`getLangPref()` 偏好
+  （`auto` 或具体语言）；持久化 localStorage `netdream.lang`，缺省 `auto`。
+- 「跟随系统」的探测源是 **mygo-runtime 的 `locale()`**（MyGo 把系统首选语言与
+  Go 侧 `SetLanguages` 声明的语言匹配后注入页面，见 backend/main.go——**漏调
+  SetLanguages 时支持列表只有英语，`App.Locale()` 恒为 en**；WebView2 的
+  `navigator.language` 不跟系统语言走，中文系统也报 en，不能用）；页面跑在
+  MyGo 窗口外（纯浏览器调试）时取不到，退回 `navigator.language`，再缺回落
+  zh-CN。映射：zh*→zh-CN、ja*→ja、其余→en-US。`onLocaleChange` 广播在 auto
+  下实时跟随系统语言切换。
+- 静态文案：元素标 `data-i18n="节.键"`（textContent）或
+  `data-i18n-attr="placeholder:节.键;title:节.键"`，`applyStatic()` 统一刷新并
+  同步 `<html lang>`；动态文案在 render 代码里用 `t()`。
+- 语言切换重刷：组件在 mount 时自己 `onLangChange(cb)`（**mount 返回的是卸载
+  函数，不能当刷新函数收集**），卸载时退订；重画不得丢用户态——改名/输入进行
+  中的组件跳过会吞输入的重画，SSE/Socket 日志区重画滚动回底（与本来 render 一致）。
+- 断言 actual、socket 系统日志这类**事后仍需随语言变**的文本存 `{key, vars}`
+  结构（assert.ts 的 AssertionResult.actual、socket.ts 的 SocketLogEntry.i18n），
+  渲染时再过 `t()`；用户数据（工作区名/请求名/URL/消息体）绝不进词典。
+- 新 UI 字符串必须三语同键入词典；Monaco 编辑器自身 UI 保持英文，
+  `monacoSetup.ts` 里文是脚本 API 的 JSDoc（悬浮文档用），不翻。
+- 设置弹层「界面设置」页里的语言下拉是入口；切语言不重载页面、不动 state。
+
+### 主题（src/theme.ts）
+
+- 浅色 / 深色 / 跟随系统；持久化 localStorage `netdream.theme`
+  （light/dark/auto，缺省 auto）；`<html data-theme>` 驱动 style.css：
+  `dark` 恒暗、`light` 恒亮、`auto` 走 `@media (prefers-color-scheme: dark)`。
+- 暗色取值在 style.css 里写两份（媒体查询内 `data-theme="auto"` + 媒体查询外
+  `data-theme="dark"`，纯 CSS 无法共用），**改配色必须两处同步**（注释已标明）。
+- 首屏防闪烁：index.html 在样式表前有一小段内联同步脚本落 `data-theme`，
+  执行时机早于模块脚本；auto 模式下系统配色变化由 CSS 接管，但 Monaco 需要
+  `monacoSetup.monacoTheme()` + `onThemeChange` 手动 `setTheme` 跟随。
+
 ### 约定
 
-- 原生 TS + strict（`noUncheckedIndexedAccess`），不引入任何 npm 依赖
-  （唯一例外：`monaco-editor`，预/后执行脚本编辑器，用户明确批准）。
-- 中文 UI 文案；样式按 ApiPost 截图：浅底、圆角卡片、蓝色主色 `#3b82f6`。
+- 原生 TS + strict（`noUncheckedIndexedAccess`），不引入任何运行时 npm 依赖
+  （例外：`monaco-editor`，预/后执行脚本编辑器；`html-minifier-terser` 仅构建期
+  压缩 HTML，不进产物运行时）。
+- UI 文案多语言（zh-CN 兜底 + en-US + ja），一律走 src/i18n 词典；
+  样式按 ApiPost 截图：浅底、圆角卡片、蓝色主色 `#3b82f6`。
 - 生成文件 `src/mygo.ts` 只能通过 `bun run generate` 更新。
 
 ## 命令

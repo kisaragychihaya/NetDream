@@ -1,10 +1,17 @@
+import { onLangChange, t } from "../i18n";
 import { AUTH_TYPES, getRequest, subscribe, updateRequest, type AuthType } from "../state";
 
-const AUTH_LABELS: Record<AuthType, string> = {
-  none: "无认证",
-  basic: "Basic Auth",
-  bearer: "Bearer Token",
-};
+/** 认证方式的显示名：无认证随语言变，Basic/Bearer 是协议名。 */
+function authLabel(type: AuthType): string {
+  switch (type) {
+    case "none":
+      return t("auth.none");
+    case "basic":
+      return "Basic Auth";
+    default:
+      return "Bearer Token";
+  }
+}
 
 export function mountAuthEditor(host: HTMLElement): () => void {
   host.textContent = "";
@@ -28,7 +35,7 @@ export function mountAuthEditor(host: HTMLElement): () => void {
       });
     });
     const text = document.createElement("span");
-    text.textContent = AUTH_LABELS[type];
+    text.textContent = authLabel(type);
     label.append(radio, text);
     types.append(label);
     radios.push(radio);
@@ -76,17 +83,17 @@ export function mountAuthEditor(host: HTMLElement): () => void {
       case "none": {
         const hint = document.createElement("p");
         hint.className = "hint";
-        hint.textContent = "该请求不携带认证信息。";
+        hint.textContent = t("auth.noneHint");
         panel.append(hint);
         break;
       }
       case "basic": {
         const fields = document.createElement("div");
         fields.className = "auth-fields";
-        const username = createField("用户名", "text", state.auth.username, "用户名", (next) => {
+        const username = createField(t("auth.username"), "text", state.auth.username, t("auth.username"), (next) => {
           getRequest().auth.username = next;
         });
-        const password = createField("密码", "password", state.auth.password, "密码", (next) => {
+        const password = createField(t("auth.password"), "password", state.auth.password, t("auth.password"), (next) => {
           getRequest().auth.password = next;
         });
         fields.append(username.field, password.field);
@@ -97,14 +104,14 @@ export function mountAuthEditor(host: HTMLElement): () => void {
         };
         const hint = document.createElement("p");
         hint.className = "hint";
-        hint.textContent = "发送时添加 Authorization: Basic 头（用户名与密码的 base64）。";
+        hint.textContent = t("auth.basicHint");
         panel.append(fields, hint);
         break;
       }
       case "bearer": {
         const fields = document.createElement("div");
         fields.className = "auth-fields";
-        const token = createField("Token", "text", state.auth.token, "粘贴 Bearer Token", (next) => {
+        const token = createField("Token", "text", state.auth.token, t("auth.tokenPlaceholder"), (next) => {
           getRequest().auth.token = next;
         });
         fields.append(token.field);
@@ -114,7 +121,7 @@ export function mountAuthEditor(host: HTMLElement): () => void {
         };
         const hint = document.createElement("p");
         hint.className = "hint";
-        hint.textContent = "发送时添加 Authorization: Bearer <token> 头。";
+        hint.textContent = t("auth.bearerHint");
         panel.append(fields, hint);
         break;
       }
@@ -130,9 +137,12 @@ export function mountAuthEditor(host: HTMLElement): () => void {
 
   sync();
   const unsubscribe = subscribe(sync);
+  // 语言切换：整块面板按当前语言重画（值都在请求态里，不丢内容）。
+  const unsubscribeLang = onLangChange(() => renderPanel());
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     host.textContent = "";
   };
 }

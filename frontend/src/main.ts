@@ -13,6 +13,7 @@ import { mountSocketPanel } from "./components/socketPanel";
 import { createTabs, type TabDef } from "./components/tabs";
 import { mountUrlBar } from "./components/urlBar";
 import { mountWorkspaceSidebar } from "./components/workspaceSidebar";
+import { applyStatic, onLangChange, t } from "./i18n";
 import type { SSEMessage } from "./mygo";
 import { RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import {
@@ -52,34 +53,29 @@ import {
   type RequestKind,
 } from "./state";
 
-const HTTP_REQUEST_TABS: TabDef[] = [
-  { id: "headers", label: "Header" },
-  { id: "query", label: "Query" },
-  { id: "path", label: "Path" },
-  { id: "body", label: "Body" },
-  { id: "auth", label: "认证" },
-  { id: "cookies", label: "Cookie" },
-  { id: "pre", label: "预执行脚本" },
-  { id: "post", label: "后执行脚本" },
-];
-
-const WEBSOCKET_REQUEST_TABS: TabDef[] = [
-  { id: "messages", label: "发送消息" },
-  { id: "headers", label: "请求头" },
-  { id: "query", label: "请求参数" },
-  { id: "settings", label: "设置" },
-];
-
-const TCP_REQUEST_TABS: TabDef[] = [{ id: "messages", label: "发送消息" }];
-
+// 页签文案随语言变，所以每次按当前语言现建；id 与顺序是固定的。
 function requestTabs(kind: RequestKind): TabDef[] {
   switch (kind) {
     case "websocket":
-      return WEBSOCKET_REQUEST_TABS;
+      return [
+        { id: "messages", label: t("tabs.messages") },
+        { id: "headers", label: t("tabs.wsHeaders") },
+        { id: "query", label: t("tabs.wsQuery") },
+        { id: "settings", label: t("tabs.settings") },
+      ];
     case "tcp":
-      return TCP_REQUEST_TABS;
+      return [{ id: "messages", label: t("tabs.messages") }];
     default:
-      return HTTP_REQUEST_TABS;
+      return [
+        { id: "headers", label: t("tabs.headers") },
+        { id: "query", label: t("tabs.query") },
+        { id: "path", label: t("tabs.path") },
+        { id: "body", label: t("tabs.body") },
+        { id: "auth", label: t("tabs.auth") },
+        { id: "cookies", label: t("tabs.cookies") },
+        { id: "pre", label: t("tabs.preScript") },
+        { id: "post", label: t("tabs.postScript") },
+      ];
   }
 }
 
@@ -186,7 +182,7 @@ async function send(): Promise<void> {
         sending: false,
         streaming: false,
         response: null,
-        error: `预执行脚本出错：${response.preScriptError}`,
+        error: t("response.preScriptFailed", { error: response.preScriptError }),
         results: [],
         ...script,
       });
@@ -236,22 +232,16 @@ function workspaceData(): WorkspaceData {
   return { name: state.name, requests: state.entries, vars: getVars() };
 }
 
-const UNSAVED_TITLE = "工作区有未保存的更改";
-const UNSAVED_NOTE =
-  "可以先保存这些更改；选择「不保存」会丢弃自上次保存以来的修改，选择「取消」则返回继续编辑。";
-const NEW_WORKSPACE_NOTE =
-  "保存后会继续新建空工作区；选择「取消保存」会丢弃自上次保存以来的修改继续新建，选择「取消新建」则留在当前工作区。";
-
 // 三键确认框是单例：对话框已经打开时，任何守卫的新触发都被忽略。
 const confirmDialog = mountConfirmDialog({ save: () => saveWorkspace(false) });
 
 interface UnsavedGuard {
-  /** 放弃未保存改动那一键的文案。 */
-  discard: string;
-  /** 取消当前操作那一键的文案。 */
-  cancel: string;
-  /** 副文案；缺省用通用的「保存 / 不保存 / 取消」说明。 */
-  note?: string;
+  /** 放弃未保存改动那一键的文案键。 */
+  discardKey: string;
+  /** 取消当前操作那一键的文案键。 */
+  cancelKey: string;
+  /** 副文案的文案键；缺省用通用的「保存 / 不保存 / 取消」说明。 */
+  noteKey?: string;
 }
 
 // 未保存守卫：工作区干净就直接执行；脏时先问，保存成功或用户明确放弃后才执行。
@@ -261,20 +251,20 @@ function guardUnsaved(action: () => void, guard: UnsavedGuard): void {
     return;
   }
   confirmDialog.open({
-    title: UNSAVED_TITLE,
-    note: guard.note ?? UNSAVED_NOTE,
-    save: "保存",
-    discard: guard.discard,
-    cancel: guard.cancel,
+    titleKey: "dialog.unsavedTitle",
+    noteKey: guard.noteKey,
+    saveKey: "dialog.save",
+    discardKey: guard.discardKey,
+    cancelKey: guard.cancelKey,
     proceed: action,
   });
 }
 
-const OPEN_UNSAVED_GUARD: UnsavedGuard = { discard: "不保存", cancel: "取消" };
+const OPEN_UNSAVED_GUARD: UnsavedGuard = { discardKey: "dialog.discard", cancelKey: "dialog.cancel" };
 const NEW_WORKSPACE_GUARD: UnsavedGuard = {
-  discard: "取消保存",
-  cancel: "取消新建",
-  note: NEW_WORKSPACE_NOTE,
+  discardKey: "dialog.cancelSave",
+  cancelKey: "dialog.cancelNew",
+  noteKey: "dialog.newWorkspaceNote",
 };
 
 function startNewWorkspace(): void {
@@ -312,7 +302,7 @@ function dropOntoFormField(x: number, y: number, paths: string[]): boolean {
 async function openDroppedWorkspace(paths: string[]): Promise<void> {
   const path = paths.find((item) => item.toLowerCase().endsWith(".band"));
   if (path === undefined) {
-    reportWorkspaceError(new Error("拖入的不是 .band 工作区文件"));
+    reportWorkspaceError(new Error(t("sidebar.droppedNotBand")));
     return;
   }
   try {
@@ -375,7 +365,7 @@ mountKVTable(viewOf("headers"), {
       state.headers = state.headers.filter((_, position) => position !== index);
     });
   },
-  addLabel: "+ 添加请求头",
+  addLabel: () => t("headers.add"),
 });
 
 mountKVTable(viewOf("query"), {
@@ -390,8 +380,8 @@ mountKVTable(viewOf("query"), {
       state.params = state.params.filter((_, position) => position !== index);
     });
   },
-  addLabel: "+ 添加参数",
-  hint: "启用的参数会拼接到 URL 的查询字符串中。",
+  addLabel: () => t("query.add"),
+  hint: () => t("query.hint"),
 });
 
 mountKVTable(viewOf("path"), {
@@ -406,8 +396,8 @@ mountKVTable(viewOf("path"), {
       state.pathParams = state.pathParams.filter((_, position) => position !== index);
     });
   },
-  addLabel: "+ 添加 Path 参数",
-  hint: "URL 中的 {占位符} 会自动生成行，发送前替换为编码后的值。",
+  addLabel: () => t("path.add"),
+  hint: () => t("path.hint"),
 });
 
 mountBodyEditor(viewOf("body"));
@@ -427,7 +417,7 @@ mountKVTable(viewOf("cookies"), {
       state.cookies = state.cookies.filter((_, position) => position !== index);
     });
   },
-  addLabel: "+ 添加 Cookie",
+  addLabel: () => t("cookies.add"),
 });
 
 mountScriptEditor(
@@ -542,6 +532,16 @@ mountWorkspaceSidebar(sidebar, {
   openSettings: () => settingsDialog.open(),
 });
 
+// 语言切换：静态标注由 applyStatic() 统一刷；各组件在自己的 mount 里注册
+// onLangChange 重画自己生成的 DOM（返回的是卸载函数，不是刷新函数，所以由
+// 组件自己订阅，主文件只负责页签文案——它在这里生成并下发给 createTabs）。
+onLangChange(() => {
+  applyStatic();
+  const defs = requestTabs(currentKind);
+  tabsKey = JSON.stringify(defs);
+  requestTabsHandle.setTabs(defs);
+});
+
 function closeWindow(): void {
   void WorkspaceService.closeWindow().catch(() => {
     // 用户已经选择放弃更改，关窗失败没有别的补救办法。
@@ -552,11 +552,11 @@ function closeWindow(): void {
 // 事件本身已经代表「脏」，所以这里直接开框，不再过 guardUnsaved 的脏判断。
 events.workspaceCloseRequested.on(() => {
   confirmDialog.open({
-    title: UNSAVED_TITLE,
-    note: UNSAVED_NOTE,
-    save: "保存",
-    discard: "不保存",
-    cancel: "取消",
+    titleKey: "dialog.unsavedTitle",
+    noteKey: "dialog.unsavedNote",
+    saveKey: "dialog.save",
+    discardKey: "dialog.discard",
+    cancelKey: "dialog.cancel",
     proceed: closeWindow,
   });
 });

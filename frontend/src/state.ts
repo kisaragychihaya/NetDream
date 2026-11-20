@@ -564,10 +564,10 @@ export function buildRequest(): APIRequest {
 
 /* ---- 工作区 ---- */
 
-const EMPTY_WORKSPACE_NAME = "未命名工作区";
-
+// 未命名工作区在数据里存空串：显示名由界面按当前语言给（侧栏与保存对话框），
+// 存进 .band 的也还是空串，换语言时不会把旧语言的默认名写成用户数据。
 const workspace: WorkspaceState = {
-  name: EMPTY_WORKSPACE_NAME,
+  name: "",
   path: null,
   entries: [],
   currentId: null,
@@ -632,7 +632,7 @@ function requestFromSaved(saved: SavedRequest): RequestState {
 }
 
 export function loadWorkspace(file: WorkspaceFile): void {
-  workspace.name = text(file.data.name) || EMPTY_WORKSPACE_NAME;
+  workspace.name = text(file.data.name);
   workspace.path = text(file.path) || null;
   workspace.entries = file.data.requests;
   // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
@@ -652,7 +652,7 @@ export function loadWorkspace(file: WorkspaceFile): void {
 // 新建空工作区：条目与变量清空、回到一条空请求，且这里的一切都不算改动
 // （脏状态最后统一清掉，否则换变量/换编辑器时的 notify 会把它又点起来）。
 export function newWorkspace(): void {
-  workspace.name = EMPTY_WORKSPACE_NAME;
+  workspace.name = "";
   workspace.path = null;
   workspace.entries = [];
   workspace.currentId = null;

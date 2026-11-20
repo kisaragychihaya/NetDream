@@ -1,3 +1,4 @@
+import { onLangChange, t } from "../i18n";
 import type { APIResponse, ScriptLog, ScriptTest, SSEEvent, SSEOpen } from "../mygo";
 import { getResponse, stopStream, subscribe, type ResponseState } from "../state";
 import { createTabs, type TabDef, type TabsHandle } from "./tabs";
@@ -5,19 +6,19 @@ import { createTabs, type TabDef, type TabsHandle } from "./tabs";
 type ResponseTabId = "body" | "headers" | "cookies" | "actual" | "example" | "console";
 type ViewMode = "pretty" | "raw" | "preview";
 
-const TAB_LABELS: { id: ResponseTabId; label: string }[] = [
-  { id: "body", label: "实时响应" },
-  { id: "headers", label: "响应头" },
-  { id: "cookies", label: "Cookie" },
-  { id: "actual", label: "实际请求" },
-  { id: "example", label: "响应示例" },
-  { id: "console", label: "控制台" },
+const TAB_LABELS: { id: ResponseTabId; labelKey: string }[] = [
+  { id: "body", labelKey: "response.live" },
+  { id: "headers", labelKey: "response.headers" },
+  { id: "cookies", labelKey: "response.cookies" },
+  { id: "actual", labelKey: "response.actual" },
+  { id: "example", labelKey: "response.example" },
+  { id: "console", labelKey: "response.console" },
 ];
 
-const VIEW_MODES: { value: ViewMode; label: string }[] = [
-  { value: "pretty", label: "美化" },
-  { value: "raw", label: "原生" },
-  { value: "preview", label: "预览" },
+const VIEW_MODES: { value: ViewMode; labelKey: string }[] = [
+  { value: "pretty", labelKey: "response.pretty" },
+  { value: "raw", labelKey: "response.raw" },
+  { value: "preview", labelKey: "response.preview" },
 ];
 
 interface StreamRefs {
@@ -46,9 +47,11 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
 
   const tabDefs = (state: ResponseState): TabDef[] => {
     const headers = state.open?.headers ?? state.response?.headers;
-    return TAB_LABELS.map((tab) =>
-      tab.id === "headers" ? { id: tab.id, label: tab.label, count: headers?.length ?? 0 } : tab,
-    );
+    return TAB_LABELS.map((tab) => ({
+      id: tab.id,
+      label: t(tab.labelKey),
+      ...(tab.id === "headers" ? { count: headers?.length ?? 0 } : {}),
+    }));
   };
 
   const currentStreamRefs = (): StreamRefs | null => streamRefs;
@@ -69,7 +72,6 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     active = next.id;
     render();
   });
-
   function renderTab(id: ResponseTabId, state: ResponseState): HTMLElement {
     switch (id) {
       case "body":
@@ -93,7 +95,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
 
     const toolbar = document.createElement("div");
     toolbar.className = "res-toolbar";
-    toolbar.append(metaText(`日志 ${state.scriptLogs.length} 条`));
+    toolbar.append(metaText(t("response.logCount", { count: state.scriptLogs.length })));
     const spacer = document.createElement("span");
     spacer.className = "spacer";
     toolbar.append(spacer);
@@ -104,17 +106,17 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
 
     const lines: HTMLElement[] = [];
     if (state.preScriptError !== null) {
-      lines.push(consoleLine("error", null, `预执行脚本错误：${state.preScriptError}`));
+      lines.push(consoleLine("error", null, t("response.preScriptError", { error: state.preScriptError })));
     }
     for (const log of state.scriptLogs) {
       lines.push(consoleLine(scriptLevel(log.level), log.at, log.text));
     }
     if (state.postScriptError !== null) {
-      lines.push(consoleLine("error", null, `后执行脚本错误：${state.postScriptError}`));
+      lines.push(consoleLine("error", null, t("response.postScriptError", { error: state.postScriptError })));
     }
 
     if (lines.length === 0) {
-      scroll.append(emptyState("暂无日志"));
+      scroll.append(emptyState(t("response.noLogs")));
     } else {
       for (const line of lines) scroll.append(line);
     }
@@ -146,11 +148,15 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       if (response.truncated) {
         const truncated = document.createElement("span");
         truncated.className = "badge-warn";
-        truncated.textContent = "响应体已截断";
+        truncated.textContent = t("response.truncated");
         toolbar.append(truncated);
       }
     } else {
-      toolbar.append(metaText(sending ? "发送中…" : error ? "请求失败" : "尚未发送请求"));
+      toolbar.append(
+        metaText(
+          sending ? t("response.sending") : error ? t("response.requestFailed") : t("response.notSent"),
+        ),
+      );
     }
 
     const spacer = document.createElement("span");
@@ -164,7 +170,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       button.type = "button";
       button.className = "seg-btn";
       button.classList.toggle("active", mode === option.value);
-      button.textContent = option.label;
+      button.textContent = t(option.labelKey);
       button.addEventListener("click", () => {
         if (mode === option.value) return;
         mode = option.value;
@@ -177,15 +183,15 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "copy-btn";
-    copy.textContent = "复制";
+    copy.textContent = t("common.copy");
     copy.disabled = response === null;
     copy.addEventListener("click", () => {
       if (!response) return;
       void copyText(response.body).then((ok) => {
         if (!copy.isConnected) return;
-        copy.textContent = ok ? "已复制" : "复制失败";
+        copy.textContent = ok ? t("common.copied") : t("common.copyFailed");
         window.setTimeout(() => {
-          if (copy.isConnected) copy.textContent = "复制";
+          if (copy.isConnected) copy.textContent = t("common.copy");
         }, 1200);
       });
     });
@@ -202,7 +208,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       box.textContent = error;
       scroll.append(box);
     } else if (!response) {
-      scroll.append(emptyState(sending ? "发送中…" : "输入 URL 后点击「发送」查看响应"));
+      scroll.append(emptyState(sending ? t("response.sending") : t("response.emptyHint")));
     } else if (mode === "preview") {
       const frame = document.createElement("iframe");
       frame.className = "res-preview";
@@ -215,7 +221,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       const pre = document.createElement("pre");
       pre.className = "res-body";
       if (response.body === "") {
-        pre.textContent = "（空响应体）";
+        pre.textContent = t("response.emptyBody");
         pre.classList.add("is-empty");
       } else if (mode === "raw") {
         pre.textContent = response.body;
@@ -245,9 +251,9 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const proto = response?.proto || open.proto;
     if (proto) toolbar.append(protoText(proto));
 
-    if (streaming) toolbar.append(metaText("流式接收中…"));
+    if (streaming) toolbar.append(metaText(t("response.streaming")));
     else if (response) toolbar.append(metaText(`${response.timeMS} ms`));
-    else toolbar.append(metaText(stopped ? "已停止" : "流已结束"));
+    else toolbar.append(metaText(stopped ? t("response.stopped") : t("response.streamEnded")));
 
     if (response && response.sizeBytes > 0) toolbar.append(metaText(formatBytes(response.sizeBytes)));
 
@@ -259,10 +265,10 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     stopButton.type = "button";
     stopButton.className = "stop-btn";
     if (streaming) {
-      stopButton.textContent = "停止";
+      stopButton.textContent = t("common.stop");
       stopButton.addEventListener("click", () => stopStream());
     } else {
-      stopButton.textContent = stopped ? "已停止" : "已结束";
+      stopButton.textContent = stopped ? t("response.stopped") : t("response.ended");
       stopButton.disabled = true;
     }
     toolbar.append(stopButton);
@@ -277,15 +283,19 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const dot = document.createElement("span");
     dot.className = "stream-dot";
     const stateText = document.createElement("span");
-    stateText.textContent = streaming ? "流式接收中" : stopped ? "已停止" : "流已结束";
+    stateText.textContent = streaming
+      ? t("response.streamingShort")
+      : stopped
+        ? t("response.stopped")
+        : t("response.streamEnded");
     stateLabel.append(dot, stateText);
 
     const headersLabel = document.createElement("span");
-    headersLabel.textContent = `响应头 ${open.headers.length} 个`;
+    headersLabel.textContent = t("response.headerCount", { count: open.headers.length });
 
     const count = document.createElement("span");
     count.className = "stream-count";
-    count.textContent = `事件 ${events.length} 条`;
+    count.textContent = t("response.eventCount", { count: events.length });
 
     meta.append(stateLabel, headersLabel, count);
     root.append(meta);
@@ -304,7 +314,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     table.className = "data-table stream-table";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const label of ["#", "ID", "事件", "Data"]) {
+    for (const label of ["#", "ID", t("response.columnEvent"), "Data"]) {
       const cell = document.createElement("th");
       cell.textContent = label;
       headRow.append(cell);
@@ -320,7 +330,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       placeholder.className = "stream-empty";
       const cell = document.createElement("td");
       cell.colSpan = 4;
-      cell.textContent = streaming ? "等待事件…" : "没有接收到事件";
+      cell.textContent = streaming ? t("response.waitingEvents") : t("response.noEvents");
       placeholder.append(cell);
       tbody.append(placeholder);
     } else {
@@ -353,7 +363,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       refs.tbody.append(eventRow(event));
     }
     refs.rendered = events.length;
-    refs.count.textContent = `事件 ${events.length} 条`;
+    refs.count.textContent = t("response.eventCount", { count: events.length });
     refs.scroll.scrollTop = refs.scroll.scrollHeight;
   }
 
@@ -361,26 +371,26 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const root = resTabRoot();
     const headers = response?.headers ?? open?.headers;
     if (headers === undefined) {
-      root.append(emptyState("发送请求后显示响应头"));
+      root.append(emptyState(t("response.headersEmpty")));
       return root;
     }
     if (headers.length === 0) {
-      root.append(emptyState("响应没有头信息"));
+      root.append(emptyState(t("response.noHeaders")));
       return root;
     }
     const rows = headers.map((header) => [header.key, header.value]);
-    root.append(dataTable(["键", "值"], rows, "key-col"));
+    root.append(dataTable([t("common.key"), t("common.value")], rows, "key-col"));
     return root;
   }
 
   function cookiesTab(response: APIResponse | null): HTMLElement {
     const root = resTabRoot();
     if (!response) {
-      root.append(emptyState("发送请求后显示 Cookie"));
+      root.append(emptyState(t("response.cookiesEmpty")));
       return root;
     }
     if (response.cookies.length === 0) {
-      root.append(emptyState("响应没有设置 Cookie"));
+      root.append(emptyState(t("response.noCookies")));
       return root;
     }
     const rows = response.cookies.map((cookie) => [
@@ -388,42 +398,56 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       cookie.value,
       cookie.domain || "-",
       cookie.path || "-",
-      cookie.expires || "会话",
-      cookie.secure ? "是" : "否",
-      cookie.httpOnly ? "是" : "否",
+      cookie.expires || t("response.session"),
+      cookie.secure ? t("common.yes") : t("common.no"),
+      cookie.httpOnly ? t("common.yes") : t("common.no"),
     ]);
-    root.append(dataTable(["名称", "值", "域名", "路径", "过期", "Secure", "HttpOnly"], rows, "key-col"));
+    root.append(
+      dataTable(
+        [
+          t("cookies.name"),
+          t("common.value"),
+          t("cookies.domain"),
+          t("cookies.path"),
+          t("cookies.expires"),
+          "Secure",
+          "HttpOnly",
+        ],
+        rows,
+        "key-col",
+      ),
+    );
     return root;
   }
 
   function actualTab(response: APIResponse | null): HTMLElement {
     const root = resTabRoot();
     if (!response) {
-      root.append(emptyState("发送请求后显示实际发出的请求"));
+      root.append(emptyState(t("response.actualEmpty")));
       return root;
     }
 
     const view = document.createElement("div");
     view.className = "actual-view";
 
-    view.append(sectionTitle("请求 URL"));
+    view.append(sectionTitle(t("response.requestURL")));
     const url = document.createElement("div");
     url.className = "actual-url";
-    url.textContent = response.finalURL || "（无）";
+    url.textContent = response.finalURL || t("common.none");
     view.append(url);
 
-    view.append(sectionTitle(`请求头（${response.sentHeaders.length}）`));
+    view.append(sectionTitle(t("response.requestHeaders", { count: response.sentHeaders.length })));
     if (response.sentHeaders.length > 0) {
       const rows = response.sentHeaders.map((header) => [header.key, header.value]);
-      view.append(dataTable(["键", "值"], rows, "key-col"));
+      view.append(dataTable([t("common.key"), t("common.value")], rows, "key-col"));
     } else {
-      view.append(noteText("没有请求头"));
+      view.append(noteText(t("response.noRequestHeaders")));
     }
 
-    view.append(sectionTitle("请求体"));
+    view.append(sectionTitle(t("response.requestBody")));
     const body = document.createElement("pre");
     body.className = "res-pre";
-    body.textContent = response.sentBody || "（无请求体）";
+    body.textContent = response.sentBody || t("response.noRequestBody");
     view.append(body);
 
     root.append(view);
@@ -494,8 +518,15 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
 
   render();
 
+  // 语言切换：页签文案变了要重新下发，内容按当前语言重画（响应都在 state 里）。
+  const unsubscribeLang = onLangChange(() => {
+    tabs.setTabs(tabDefs(getResponse()));
+    render();
+  });
+
   return () => {
     unsubscribe();
+    unsubscribeLang();
     tabsHost.textContent = "";
     contentHost.textContent = "";
   };
@@ -518,7 +549,7 @@ function placeholderTab(): HTMLElement {
   const root = resTabRoot();
   const box = document.createElement("div");
   box.className = "placeholder";
-  box.textContent = "即将支持";
+  box.textContent = t("response.comingSoon");
   root.append(box);
   return root;
 }
@@ -530,9 +561,9 @@ function scriptLevel(value: string): ScriptLevel {
 }
 
 const LEVEL_LABELS: Record<ScriptLevel, string> = {
-  log: "日志",
-  warn: "警告",
-  error: "错误",
+  log: "response.levelLog",
+  warn: "response.levelWarn",
+  error: "response.levelError",
 };
 
 function pad(value: number, width = 2): string {
@@ -555,7 +586,7 @@ function consoleLine(level: ScriptLevel, at: number | null, text: string): HTMLE
 
   const badge = document.createElement("span");
   badge.className = `console-level ${level}`;
-  badge.textContent = LEVEL_LABELS[level];
+  badge.textContent = t(LEVEL_LABELS[level]);
 
   const body = document.createElement("pre");
   body.className = "console-text";

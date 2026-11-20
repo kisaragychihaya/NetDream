@@ -6,6 +6,16 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/png" href="./icon.png" />
     <title>NetDream</title>
+    <script>
+      // 主题偏好必须赶在样式表之前落到 <html data-theme> 上，否则首屏会先
+      // 按亮色画一帧再翻成深色。取值与 src/theme.ts 一致：light / dark / auto。
+      try {
+        const mode = localStorage.getItem("netdream.theme");
+        document.documentElement.dataset.theme = mode === "light" || mode === "dark" ? mode : "auto";
+      } catch {
+        document.documentElement.dataset.theme = "auto";
+      }
+    </script>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
@@ -18,16 +28,22 @@
         <header id="topbar"></header>
 
         <!-- 请求区：选项卡与编辑器 -->
-        <nav id="req-tabs" role="tablist" aria-label="请求"></nav>
+        <nav id="req-tabs" role="tablist" aria-label="请求" data-i18n-attr="aria-label:common.request"></nav>
         <section id="req-panel"></section>
 
         <!-- 响应区：选项卡、内容与断言侧栏 -->
         <section id="response-pane">
-          <nav id="res-tabs" role="tablist" aria-label="响应"></nav>
+          <nav id="res-tabs" role="tablist" aria-label="响应" data-i18n-attr="aria-label:common.response"></nav>
           <div id="res-content"></div>
           <aside id="assert-panel"></aside>
           <!-- Socket 响应区：kind=websocket/tcp 时可见 -->
-          <nav id="socket-res-tabs" role="tablist" aria-label="Socket 响应" hidden></nav>
+          <nav
+            id="socket-res-tabs"
+            role="tablist"
+            aria-label="Socket 响应"
+            data-i18n-attr="aria-label:socket.response"
+            hidden
+          ></nav>
           <div id="socket-res-content" hidden></div>
         </section>
       </div>

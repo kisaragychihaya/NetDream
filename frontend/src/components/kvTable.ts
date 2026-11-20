@@ -1,3 +1,4 @@
+import { onLangChange, t } from "../i18n";
 import {
   FORM_FIELD_KINDS,
   subscribe,
@@ -13,7 +14,8 @@ export interface KVTableOptions {
   append: () => void;
   /** 删除第 index 行；同样由调用方写回数据源。 */
   remove: (index: number) => void;
-  addLabel: string;
+  /** 新增按钮的文案；用 getter 是因为语言切换后要重取。 */
+  addLabel: () => string;
   withContentType?: boolean;
   /** 是否显示启用列（默认显示）。 */
   withEnabled?: boolean;
@@ -28,18 +30,18 @@ export interface KVTableOptions {
   pickFile?: (index: number) => void;
   canAdd?: boolean;
   canRemove?: boolean;
-  hint?: string;
+  hint?: () => string;
   /** 单元格编辑后的提交动作；默认写回请求态（updateRequest）。 */
   commit?: () => void;
   /** 数据源变化通知；默认订阅请求态。 */
   subscribe?: (listener: () => void) => () => void;
 }
 
-const KIND_LABELS: Record<FormFieldKind, string> = { text: "文本", file: "文件" };
+const KIND_LABELS: Record<FormFieldKind, string> = { text: "common.text", file: "common.file" };
 
 const KIND_TITLES: Record<FormFieldKind, string> = {
-  text: "作为文本字段发送",
-  file: "作为文件上传（发送时读取文件内容）",
+  text: "common.textFieldTitle",
+  file: "common.fileFieldTitle",
 };
 
 /** 路径的末段；Windows 与 POSIX 分隔符都认。 */
@@ -52,13 +54,13 @@ function makeKindSwitch(kind: FormFieldKind, onChange: (kind: FormFieldKind) => 
   const group = document.createElement("span");
   group.className = "kv-kind";
   group.setAttribute("role", "radiogroup");
-  group.setAttribute("aria-label", "字段类型");
+  group.setAttribute("aria-label", t("common.fieldType"));
   for (const option of FORM_FIELD_KINDS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "kv-kind-option";
-    button.textContent = KIND_LABELS[option];
-    button.title = KIND_TITLES[option];
+    button.textContent = t(KIND_LABELS[option]);
+    button.title = t(KIND_TITLES[option]);
     button.setAttribute("aria-pressed", String(option === kind));
     if (option === kind) button.classList.add("active");
     button.addEventListener("click", () => onChange(option));
@@ -76,15 +78,15 @@ function makeFileCell(index: number, filePath: string, onPick: () => void): HTML
   const label = baseName(filePath);
   const name = document.createElement("span");
   name.className = "kv-file-name";
-  name.textContent = label === "" ? "未选择文件" : label;
+  name.textContent = label === "" ? t("common.noFile") : label;
   name.classList.toggle("empty", label === "");
   name.title = filePath;
 
   const pick = document.createElement("button");
   pick.type = "button";
   pick.className = "kv-file-pick";
-  pick.textContent = "选择";
-  pick.title = "选择文件";
+  pick.textContent = t("common.choose");
+  pick.title = t("common.chooseFile");
   pick.addEventListener("click", onPick);
 
   cell.append(name, pick);
@@ -156,7 +158,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
     if (options.hint) {
       const hint = document.createElement("p");
       hint.className = "hint";
-      hint.textContent = options.hint;
+      hint.textContent = options.hint();
       root.append(hint);
     }
 
@@ -164,10 +166,10 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
     head.className = "kv-head";
     const labels: string[] = [];
     if (withEnabled) labels.push("");
-    if (withFileKind) labels.push("类型");
-    labels.push("键", "值");
-    if (options.withContentType) labels.push("内容类型");
-    if (withDescription) labels.push("描述");
+    if (withFileKind) labels.push(t("common.type"));
+    labels.push(t("common.key"), t("common.value"));
+    if (options.withContentType) labels.push(t("common.contentType"));
+    if (withDescription) labels.push(t("common.description"));
     labels.push("");
     for (const label of labels) {
       const cell = document.createElement("span");
@@ -185,7 +187,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
         enabled.type = "checkbox";
         enabled.className = "kv-enabled";
         enabled.checked = row.enabled;
-        enabled.title = "启用";
+        enabled.title = t("common.enabled");
         enabled.addEventListener("change", () => {
           row.enabled = enabled.checked;
           commit();
@@ -210,7 +212,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
 
       line.append(
         makeInput(
-          "键",
+          t("common.key"),
           row.key,
           "key",
           (next) => {
@@ -225,7 +227,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
       } else {
         line.append(
           makeInput(
-            "值",
+            t("common.value"),
             row.value,
             "value",
             (next) => {
@@ -240,7 +242,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
         const typedRow = row as FormRow;
         line.append(
           makeInput(
-            "默认",
+            t("common.default"),
             typedRow.contentType,
             "contentType",
             (next) => {
@@ -254,7 +256,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
       if (withDescription) {
         line.append(
           makeInput(
-            "描述",
+            t("common.description"),
             row.description,
             "description",
             (next) => {
@@ -271,7 +273,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "kv-delete";
-        remove.title = "删除";
+        remove.title = t("common.delete");
         remove.textContent = "×";
         remove.addEventListener("click", () => options.remove(index));
         line.append(remove);
@@ -285,7 +287,7 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
     const add = document.createElement("button");
     add.type = "button";
     add.className = "add-row";
-    add.textContent = options.addLabel;
+    add.textContent = options.addLabel();
     add.addEventListener("click", () => {
       options.append();
       focusLastKey();
@@ -296,11 +298,14 @@ export function mountKVTable(host: HTMLElement, options: KVTableOptions): () => 
   const unsubscribe = (options.subscribe ?? subscribe)(() => {
     if (options.rows() !== rendered) render();
   });
+  // 语言切换只换文案：整表重画，数据仍在 options.rows() 里。
+  const unsubscribeLang = onLangChange(() => render());
 
   render();
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     host.textContent = "";
   };
 }

@@ -1,4 +1,5 @@
 import { Channel } from "mygo-runtime";
+import { t } from "./i18n";
 import type { KeyValue, SocketConnectParams, SocketEvent } from "./mygo";
 import { SocketService } from "./mygo";
 import { getRequest, updateResponse, wireValues, type RequestKind } from "./state";
@@ -14,6 +15,13 @@ export interface SocketLogEntry {
   isBinary: boolean;
   /** 系统行的着色：错误红、其余灰。 */
   tone?: "error" | "muted";
+  /** 系统行的词典键与插值变量：存结构而不是成品文案，切语言后按当前语言显示。 */
+  i18n?: { key: string; vars?: Record<string, string | number> };
+}
+
+/** 日志行的显示文案：系统行按当前语言现取，收发消息是用户数据。 */
+export function logText(entry: SocketLogEntry): string {
+  return entry.i18n === undefined ? entry.payload : t(entry.i18n.key, entry.i18n.vars);
 }
 
 export interface SocketSession {
@@ -74,6 +82,15 @@ function systemLine(payload: string, tone?: "error" | "muted"): SocketLogEntry {
   return { id: newId(), at: Date.now(), direction: "system", payload, isBinary: false, tone };
 }
 
+// 系统行的固定文案（连接状态等）走词典：payload 留空，显示时按当前语言取。
+function systemMessage(
+  key: string,
+  vars?: Record<string, string | number>,
+  tone?: "error" | "muted",
+): SocketLogEntry {
+  return { id: newId(), at: Date.now(), direction: "system", payload: "", isBinary: false, tone, i18n: { key, vars } };
+}
+
 function appendLog(entry: SocketLogEntry): void {
   session.log.push(entry);
   if (session.log.length > SOCKET_LOG_LIMIT) session.log.splice(0, session.log.length - SOCKET_LOG_LIMIT);
@@ -90,26 +107,26 @@ export function clearSocketLog(): void {
 function urlProblem(kind: RequestKind, url: string): string | null {
   const target = url.trim();
   if (kind === "websocket") {
-    if (target === "" || !/^wss?:\/\//i.test(target)) return "请输入以 ws:// 或 wss:// 开头的地址";
+    if (target === "" || !/^wss?:\/\//i.test(target)) return t("socket.urlNeedsWs");
     try {
       const parsed = new URL(target);
-      if (parsed.host === "") return "请输入以 ws:// 或 wss:// 开头的地址";
+      if (parsed.host === "") return t("socket.urlNeedsWs");
     } catch {
-      return "WebSocket 地址格式不正确";
+      return t("socket.urlInvalidWs");
     }
     return null;
   }
   if (kind === "tcp") {
     const marker = target.lastIndexOf(":");
-    if (marker <= 0) return "请输入主机:端口，如 127.0.0.1:7000";
+    if (marker <= 0) return t("socket.urlNeedsTcp");
     const host = target.slice(0, marker).trim();
     const port = Number(target.slice(marker + 1));
     if (host === "" || !Number.isInteger(port) || port < 1 || port > 65535) {
-      return "请输入主机:端口，如 127.0.0.1:7000";
+      return t("socket.urlNeedsTcp");
     }
     return null;
   }
-  return "只有 WebSocket/TCP 请求可以建立连接";
+  return t("socket.httpNoConnect");
 }
 
 // connectSocket dials the connection the editor describes. Connect stays for
@@ -161,7 +178,7 @@ export function connectSocket(): void {
     // 没收到任何事件就结束的连接。
     if (session.status === "connecting" || session.status === "open") {
       session.status = "closed";
-      appendLog(systemLine("连接已结束", "muted"));
+      appendLog(systemMessage("socket.closedByChannel", undefined, "muted"));
     }
   };
   void SocketService.connect(params, channel).catch((error: unknown) => {
@@ -184,8 +201,8 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
       session.handshakeHeaders = event.headers ?? [];
       session.protocol = event.protocol ?? "";
       const label = params.kind === "websocket" ? "WebSocket" : "TCP";
-      const protocol = session.protocol === "" ? "" : `，子协议 ${session.protocol}`;
-      appendLog(systemLine(`${label} 已连接 ${params.url}${protocol}`, "muted"));
+      const protocol = session.protocol === "" ? "" : t("socket.protocolSuffix", { protocol: session.protocol });
+      appendLog(systemMessage("socket.connected", { kind: label, url: params.url, protocol }, "muted"));
       return;
     }
     case "message": {
@@ -200,8 +217,11 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
     }
     case "error": {
       session.status = "closed";
-      const reason = event.reason === undefined || event.reason === "" ? "连接出错" : event.reason;
-      const message = event.code !== undefined && event.code > 0 ? `${reason}（HTTP ${event.code}）` : reason;
+      const reason = event.reason === undefined || event.reason === "" ? t("socket.connectError") : event.reason;
+      const message =
+        event.code !== undefined && event.code > 0
+          ? t("socket.errorWithCode", { reason, code: event.code })
+          : reason;
       updateResponse({ error: message });
       appendLog(systemLine(message, "error"));
       return;
@@ -218,9 +238,11 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
 
 function closeText(event: SocketEvent): string {
   const details: string[] = [];
-  if (event.code !== undefined && event.code > 0) details.push(`代码 ${event.code}`);
+  if (event.code !== undefined && event.code > 0) details.push(t("socket.closeCode", { code: event.code }));
   if (event.reason !== undefined && event.reason !== "") details.push(event.reason);
-  return details.length === 0 ? "连接已被对端关闭" : `连接已关闭（${details.join("，")}）`;
+  return details.length === 0
+    ? t("socket.closedByPeer")
+    : t("socket.closedWithDetails", { details: details.join(t("common.listSeparator")) });
 }
 
 // sendSocketMessage writes one message on the live connection; the log line
@@ -229,7 +251,7 @@ function closeText(event: SocketEvent): string {
 export function sendSocketMessage(message: { payload: string; isBinary: boolean }): void {
   const connId = session.connId;
   if (connId === null || session.status !== "open") {
-    updateResponse({ error: "连接未建立，先点「连接」" });
+    updateResponse({ error: t("socket.notConnected") });
     return;
   }
   void SocketService.send({ id: connId, payload: message.payload, isBinary: message.isBinary }).catch(
@@ -250,7 +272,7 @@ export function disconnectSocket(): void {
   session.stoppedByUser = true;
   session.connId = null;
   session.status = "closed";
-  appendLog(systemLine("已断开连接", "muted"));
+  appendLog(systemMessage("socket.disconnected", undefined, "muted"));
   if (connId === null) return;
   void SocketService.disconnect(connId).catch(() => {
     // 连接已经没了：Disconnect 对未知 id 本就不是错误。

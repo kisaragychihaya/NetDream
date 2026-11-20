@@ -1,7 +1,9 @@
+import { onLangChange, t } from "../i18n";
 import type { KeyValue } from "../mygo";
 import {
   clearSocketLog,
   getSocketSession,
+  logText,
   SOCKET_LOG_LIMIT,
   subscribeSocket,
   type SocketLogEntry,
@@ -14,16 +16,16 @@ import { createTabs, type TabDef } from "./tabs";
 type PanelTabId = "log" | "headers";
 
 const STATUS_TEXT: Record<SocketStatus, string> = {
-  idle: "未连接",
-  connecting: "连接中…",
-  open: "已连接",
-  closed: "已断开",
+  idle: "socket.idle",
+  connecting: "socket.connecting",
+  open: "socket.open",
+  closed: "socket.closed",
 };
 
 const DIRECTION_TEXT: Record<SocketLogEntry["direction"], string> = {
-  send: "发送",
-  receive: "接收",
-  system: "系统",
+  send: "socket.dirSend",
+  receive: "socket.dirReceive",
+  system: "socket.dirSystem",
 };
 
 interface LogShell {
@@ -57,11 +59,11 @@ function rowFor(entry: SocketLogEntry): HTMLElement {
   if (entry.tone !== undefined) classes.push(entry.tone);
   const row = el("div", classes.join(" "));
   row.append(el("span", "sock-time", timeText(entry.at)));
-  row.append(el("span", "sock-dir", DIRECTION_TEXT[entry.direction]));
+  row.append(el("span", "sock-dir", t(DIRECTION_TEXT[entry.direction])));
   if (entry.isBinary) row.append(el("span", "sock-b64", "base64"));
   const payload = document.createElement("pre");
   payload.className = "sock-payload";
-  payload.textContent = entry.payload;
+  payload.textContent = logText(entry);
   row.append(payload);
   return row;
 }
@@ -94,9 +96,9 @@ function copyText(text: string): Promise<boolean> {
 }
 
 function tabsFor(kind: RequestKind, session: SocketSession): TabDef[] {
-  const defs: TabDef[] = [{ id: "log", label: "实时响应" }];
+  const defs: TabDef[] = [{ id: "log", label: t("socket.live") }];
   if (kind !== "tcp") {
-    defs.push({ id: "headers", label: "响应头", count: session.handshakeHeaders?.length ?? 0 });
+    defs.push({ id: "headers", label: t("response.headers"), count: session.handshakeHeaders?.length ?? 0 });
   }
   return defs;
 }
@@ -132,12 +134,12 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
     protocol.hidden = true;
     const count = el("span", "meta sock-count");
     const spacer = el("span", "spacer");
-    const clear = el("button", "copy-btn", "清空");
+    const clear = el("button", "copy-btn", t("common.clear"));
     clear.type = "button";
-    clear.title = "清空实时响应日志";
-    const copy = el("button", "copy-btn", "复制全部");
+    clear.title = t("socket.clearLogTitle");
+    const copy = el("button", "copy-btn", t("socket.copyAll"));
     copy.type = "button";
-    copy.title = "复制全部日志";
+    copy.title = t("socket.copyAllTitle");
     toolbar.append(badge, protocol, count, spacer, clear, copy);
 
     const banner = el("div", "res-error");
@@ -157,14 +159,15 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
       const session = getSocketSession();
       const text = session.log
         .map((entry) => {
-          const tag = DIRECTION_TEXT[entry.direction] + (entry.isBinary ? " base64" : "");
-          return `${timeText(entry.at)} [${tag}] ${entry.payload}`;
+          const tag = t(DIRECTION_TEXT[entry.direction]) + (entry.isBinary ? " base64" : "");
+          return `${timeText(entry.at)} [${tag}] ${logText(entry)}`;
         })
         .join("\n");
       void copyText(text).then((ok) => {
-        copy.textContent = text === "" ? "没有日志" : ok ? "已复制" : "复制失败";
+        copy.textContent =
+          text === "" ? t("socket.noLogs") : ok ? t("common.copied") : t("common.copyFailed");
         window.setTimeout(() => {
-          copy.textContent = "复制全部";
+          copy.textContent = t("socket.copyAll");
         }, 1200);
       });
     });
@@ -210,13 +213,13 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
     const view = shell;
     if (view === null) return;
 
-    view.badge.textContent = STATUS_TEXT[session.status];
+    view.badge.textContent = t(STATUS_TEXT[session.status]);
     view.badge.dataset.state = session.status;
-    const protocol = session.protocol === "" ? "" : `子协议 ${session.protocol}`;
+    const protocol = session.protocol === "" ? "" : t("socket.protocolTag", { protocol: session.protocol });
     view.protocol.textContent = protocol;
     view.protocol.hidden = protocol === "";
-    view.count.textContent = `${session.log.length} 条`;
-    view.count.title = kind === "tcp" ? "TCP 连接" : "WebSocket 连接";
+    view.count.textContent = t("socket.logCount", { count: session.log.length });
+    view.count.title = kind === "tcp" ? t("socket.tcpConnection") : t("socket.wsConnection");
 
     const error = getResponse().error;
     view.banner.textContent = error ?? "";
@@ -240,7 +243,7 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
         el(
           "div",
           "empty-state",
-          session.status === "open" ? "这次握手没有返回响应头" : "连接成功后显示 WebSocket 握手响应头",
+          session.status === "open" ? t("socket.noHandshakeHeaders") : t("socket.handshakeHint"),
         ),
       );
       return;
@@ -250,7 +253,7 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
     table.className = "data-table";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const label of ["键", "值"]) {
+    for (const label of [t("common.key"), t("common.value")]) {
       const cell = document.createElement("th");
       cell.textContent = label;
       headRow.append(cell);
@@ -297,10 +300,21 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
 
   const unsubscribeState = subscribe(render);
   const unsubscribeSocket = subscribeSocket(render);
+  // 语言切换：状态徽标、日志行、握手头都重画；日志本身在 session 里，不丢。
+  const unsubscribeLang = onLangChange(() => {
+    shell = null;
+    headersRoot = null;
+    tabKey = "";
+    headersKey = "";
+    renderedLastId = null;
+    showing = null;
+    render();
+  });
 
   return () => {
     unsubscribeState();
     unsubscribeSocket();
+    unsubscribeLang();
     tabsHost.textContent = "";
     contentHost.textContent = "";
   };

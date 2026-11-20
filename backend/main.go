@@ -7,6 +7,10 @@ import (
 	_ "time/tzdata"
 
 	"github.com/egoist/mygo"
+	// MyGo 自带控件/菜单的翻译：随 SetLanguages 声明的语言生效，
+	// 不引入时 MyGo 自身字符串（对话框按钮等）始终是英文。
+	_ "github.com/egoist/mygo/locales/ja"
+	_ "github.com/egoist/mygo/locales/zh-Hans"
 )
 
 // The window the page opens in.
@@ -20,6 +24,11 @@ const (
 
 func main() {
 	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, AppService{})
+
+	// 应用界面支持的语言（第一个是回退语言）。不调 SetLanguages 时
+	// MyGo 只认英语，App.Locale()（即前端 mygo.locale）在任何语言的
+	// 系统上都解析成 "en"，「跟随系统」会恒显示英文。
+	mygo.App.SetLanguages("zh-CN", "en-US", "ja")
 
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{

@@ -1,3 +1,4 @@
+import { onLangChange, t } from "../i18n";
 import {
   METHODS,
   emptyRow,
@@ -38,12 +39,12 @@ const METHOD_CLASSES: Record<Method, string> = {
   OPTIONS: "m-options",
 };
 
-const UNTITLED_REQUEST = "未命名请求";
+const UNTITLED_REQUEST = "sidebar.untitledRequest";
 
-const NEW_OPTIONS: { kind: RequestKind; label: string }[] = [
-  { kind: "http", label: "HTTP 请求" },
-  { kind: "websocket", label: "WebSocket 连接" },
-  { kind: "tcp", label: "TCP 连接" },
+const NEW_OPTIONS: { kind: RequestKind; labelKey: string }[] = [
+  { kind: "http", labelKey: "sidebar.newHttp" },
+  { kind: "websocket", labelKey: "sidebar.newWebSocket" },
+  { kind: "tcp", labelKey: "sidebar.newTcp" },
 ];
 
 function methodClass(method: string): string {
@@ -52,7 +53,7 @@ function methodClass(method: string): string {
 }
 
 function displayOf(entry: SavedRequest): string {
-  return entry.name.trim() === "" ? UNTITLED_REQUEST : entry.name;
+  return entry.name.trim() === "" ? t(UNTITLED_REQUEST) : entry.name;
 }
 
 export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHandlers): () => void {
@@ -129,10 +130,10 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
         rows = rows.filter((_, position) => position !== index);
         commit();
       },
-      addLabel: "+ 添加变量",
+      addLabel: () => t("sidebar.addVar"),
       withEnabled: false,
       withDescription: false,
-      hint: "{{变量名}} 在发送前替换为这里的值，脚本可用 nd.vars 读写。",
+      hint: () => t("sidebar.varsHint"),
       commit,
       subscribe: subscribeVars,
     });
@@ -152,7 +153,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     header.className = "ws-section";
     header.setAttribute("aria-expanded", varsCollapsed ? "false" : "true");
     const label = document.createElement("span");
-    label.textContent = "变量";
+    label.textContent = t("sidebar.vars");
     const chevron = document.createElement("span");
     chevron.className = "chevron";
     chevron.textContent = "▾";
@@ -279,11 +280,13 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     remove.type = "button";
     remove.className = "ws-del";
     remove.textContent = "×";
-    remove.title = "删除请求";
+    remove.title = t("sidebar.deleteRequest");
     remove.addEventListener("click", (event) => {
       event.stopPropagation();
       const live = liveEntry(entry.id);
-      if (live !== undefined && window.confirm(`删除请求“${displayOf(live)}”？`)) handlers.remove(entry.id);
+      if (live !== undefined && window.confirm(t("sidebar.deleteConfirm", { name: displayOf(live) }))) {
+        handlers.remove(entry.id);
+      }
     });
 
     row.append(badge, name, remove);
@@ -301,24 +304,24 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
     const title = document.createElement("div");
     title.className = "ws-title";
-    title.textContent = state.name.trim() === "" ? "未命名工作区" : state.name;
-    title.title = state.path ?? "未保存的工作区";
+    title.textContent = state.name.trim() === "" ? t("sidebar.untitledWorkspace") : state.name;
+    title.title = state.path ?? t("sidebar.unsavedWorkspace");
     title.addEventListener("dblclick", () => beginRename(title, getWorkspace().name, handlers.renameWorkspace));
 
     const actions = document.createElement("div");
     actions.className = "ws-actions";
     // 四个按钮挤在 240px 的侧栏里：文案一律两字，全名放 title。
-    for (const [label, hint, run] of [
-      ["打开", "打开 .band 工作区", handlers.open],
-      ["保存", "保存到当前 .band 文件", handlers.save],
-      ["另存", "另存为新的 .band 文件", handlers.saveAs],
-      ["新建", "新建工作区", handlers.newWorkspace],
+    for (const [labelKey, hintKey, run] of [
+      ["sidebar.open", "sidebar.openTitle", handlers.open],
+      ["sidebar.save", "sidebar.saveTitle", handlers.save],
+      ["sidebar.saveAs", "sidebar.saveAsTitle", handlers.saveAs],
+      ["sidebar.newWorkspace", "sidebar.newWorkspaceTitle", handlers.newWorkspace],
     ] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ws-btn";
-      button.textContent = label;
-      button.title = hint;
+      button.textContent = t(labelKey);
+      button.title = t(hintKey);
       button.addEventListener("click", () => run());
       actions.append(button);
     }
@@ -328,7 +331,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     const createButton = document.createElement("button");
     createButton.type = "button";
     createButton.className = "ws-new";
-    createButton.textContent = "＋ 新建请求";
+    createButton.textContent = t("sidebar.newRequest");
     createButton.setAttribute("aria-haspopup", "menu");
     createButton.setAttribute("aria-expanded", "false");
 
@@ -342,7 +345,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
       item.className = "ws-new-item";
       item.setAttribute("role", "menuitem");
       item.dataset.kind = option.kind;
-      item.textContent = option.label;
+      item.textContent = t(option.labelKey);
       item.addEventListener("click", () => {
         closeMenu();
         handlers.newRequest(option.kind);
@@ -367,7 +370,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     if (state.entries.length === 0) {
       const empty = document.createElement("p");
       empty.className = "ws-empty";
-      empty.textContent = "打开 .band 工作区，或点「＋ 新建请求」开始";
+      empty.textContent = t("sidebar.empty");
       panel.append(empty);
     } else {
       const list = document.createElement("div");
@@ -384,8 +387,9 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     const gear = document.createElement("button");
     gear.type = "button";
     gear.className = "ws-settings";
-    gear.title = "设置";
-    gear.setAttribute("aria-label", "设置");
+    gear.title = t("common.settings");
+    gear.setAttribute("aria-label", t("common.settings"));
+    gear.dataset.i18nAttr = "title:common.settings;aria-label:common.settings";
     gear.innerHTML =
       '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
     gear.addEventListener("click", () => handlers.openSettings());
@@ -403,9 +407,9 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
     const title = host.querySelector<HTMLElement>(".ws-title");
     if (title !== null) {
-      const name = state.name.trim() === "" ? "未命名工作区" : state.name;
+      const name = state.name.trim() === "" ? t("sidebar.untitledWorkspace") : state.name;
       if (title.textContent !== name) title.textContent = name;
-      const hint = state.path ?? "未保存的工作区";
+      const hint = state.path ?? t("sidebar.unsavedWorkspace");
       if (title.title !== hint) title.title = hint;
     }
 
@@ -428,11 +432,16 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
   // beginRename's finish runs after mount, when sync is defined.
   const unsubscribe = subscribe(sync);
+  // 语言切换：整块侧栏重画（工作区名、请求名是用户数据，保持原样）。
+  const unsubscribeLang = onLangChange(() => {
+    if (!editing) draw();
+  });
 
   draw();
 
   return () => {
     unsubscribe();
+    unsubscribeLang();
     document.removeEventListener("click", onDocumentClick);
     document.removeEventListener("keydown", onDocumentKey);
     disposeVars?.();

@@ -1,4 +1,4 @@
-import { monaco } from "../monacoSetup";
+import { monaco, monacoTheme } from "../monacoSetup";
 
 /**
  * 挂载一个 Monaco 脚本编辑器，与外部状态双向绑定：
@@ -21,7 +21,7 @@ export function mountScriptEditor(
   const instance = monaco.editor.create(box, {
     value: get(),
     language: "javascript",
-    theme: "vs",
+    theme: monacoTheme(),
     minimap: { enabled: false },
     fontSize: 13,
     wordWrap: "on",

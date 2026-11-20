@@ -3,17 +3,23 @@
  *
  * 单例：应用里只有一个未保存守卫场景在前面，同一个对话框按每次打开的配置
  * 换标题、副文案与按钮文案，避免多个模态框叠加。
+ *
+ * 文案传词典键而不是成品文案：对话框开着时切语言，标题与按钮也跟着换。
  */
 
+import { onLangChange, t } from "../i18n";
+
 export interface ConfirmDialogOptions {
-  title: string;
-  note: string;
-  /** 主按钮（primary）文案：先跑保存流程，成功后再继续。 */
-  save: string;
-  /** 中间按钮文案：放弃未保存的改动，直接继续。 */
-  discard: string;
-  /** 末尾按钮文案：只关掉对话框，保持现状。 */
-  cancel: string;
+  /** 标题的词典键。 */
+  titleKey: string;
+  /** 副文案的词典键；缺省用通用的「保存 / 不保存 / 取消」说明。 */
+  noteKey?: string;
+  /** 主按钮（primary）文案的词典键：先跑保存流程，成功后再继续。 */
+  saveKey: string;
+  /** 中间按钮文案的词典键：放弃未保存的改动，直接继续。 */
+  discardKey: string;
+  /** 末尾按钮文案的词典键：只关掉对话框，保持现状。 */
+  cancelKey: string;
   /** 继续执行的动作：保存成功后与选择放弃后都走它。 */
   proceed: () => void;
 }
@@ -28,7 +34,7 @@ export interface ConfirmDialog {
   open: (options: ConfirmDialogOptions) => void;
 }
 
-const SAVING_LABEL = "保存中…";
+const DEFAULT_NOTE_KEY = "dialog.unsavedNote";
 
 export function mountConfirmDialog(handlers: ConfirmDialogHandlers): ConfirmDialog {
   const overlay = document.createElement("div");
@@ -72,10 +78,20 @@ export function mountConfirmDialog(handlers: ConfirmDialogHandlers): ConfirmDial
   // 当前这次打开的配置：按钮文案与「继续」动作都来自它。
   let current: ConfirmDialogOptions | null = null;
 
+  // 按当前语言写标题、副文案与三个按钮。
+  const applyLabels = (): void => {
+    if (current === null) return;
+    title.textContent = t(current.titleKey);
+    note.textContent = t(current.noteKey ?? DEFAULT_NOTE_KEY);
+    saveButton.textContent = busy ? t("dialog.saving") : t(current.saveKey);
+    discardButton.textContent = t(current.discardKey);
+    cancelButton.textContent = t(current.cancelKey);
+  };
+
   const setBusy = (next: boolean): void => {
     busy = next;
     for (const button of [saveButton, discardButton, cancelButton]) button.disabled = next;
-    saveButton.textContent = next ? SAVING_LABEL : (current?.save ?? "保存");
+    saveButton.textContent = next ? t("dialog.saving") : t(current?.saveKey ?? "common.save");
   };
 
   const hide = (): void => {
@@ -127,15 +143,16 @@ export function mountConfirmDialog(handlers: ConfirmDialogHandlers): ConfirmDial
     })();
   });
 
+  // 对话框开着时切语言：标题与按钮文案跟着换。
+  onLangChange(() => {
+    if (shown) applyLabels();
+  });
+
   return {
     open: (options) => {
       if (shown) return;
       current = options;
-      title.textContent = options.title;
-      note.textContent = options.note;
-      saveButton.textContent = options.save;
-      discardButton.textContent = options.discard;
-      cancelButton.textContent = options.cancel;
+      applyLabels();
       shown = true;
       overlay.hidden = false;
       saveButton.focus();
