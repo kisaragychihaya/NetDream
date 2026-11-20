@@ -1,7 +1,7 @@
 import { onLangChange, t } from "../i18n";
 import type { SavedMessage } from "../mygo";
 import { getSocketSession, sendSocketMessage, subscribeSocket, type SocketStatus } from "../socket";
-import { getRequest, subscribe, updateRequest, type MessageType } from "../state";
+import { getRequest, subscribe, updateRequest, type MessageType, type RequestKind } from "../state";
 
 const MESSAGE_TYPES: { value: MessageType; label: string }[] = [
   { value: "text", label: "Text" },
@@ -25,6 +25,8 @@ interface Draft {
   name: string;
   msgType: MessageType;
   payload: string;
+  /** Socket.IO 模板的事件名；空 = "message"（ws/tcp 忽略）。 */
+  event: string;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -56,7 +58,7 @@ function messageType(value: string): MessageType {
 }
 
 function emptyDraft(): Draft {
-  return { name: "", msgType: "text", payload: "" };
+  return { name: "", msgType: "text", payload: "", event: "" };
 }
 
 function typeLabel(type: MessageType): string {
@@ -67,7 +69,12 @@ function typeLabel(type: MessageType): string {
 }
 
 function draftFrom(message: SavedMessage): Draft {
-  return { name: message.name, msgType: messageType(message.msgType), payload: message.payload };
+  return {
+    name: message.name,
+    msgType: messageType(message.msgType),
+    payload: message.payload,
+    event: message.event,
+  };
 }
 
 export function mountSocketComposer(host: HTMLElement): () => void {
@@ -82,7 +89,8 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   const side = el("aside", "sock-tpl");
   const sideHead = el("div", "sock-tpl-head");
   const sideTitle = el("span", "sock-tpl-title", t("socket.templates"));
-  sideHead.append(sideTitle);  const addButton = el("button", "sock-tpl-add", t("socket.addTemplate"));
+  sideHead.append(sideTitle);
+  const addButton = el("button", "sock-tpl-add", t("socket.addTemplate"));
   addButton.type = "button";
   addButton.title = t("socket.addTemplateTitle");
   sideHead.append(addButton);
@@ -100,13 +108,23 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   const typeSelect = document.createElement("select");
   typeSelect.className = "sock-type";
   typeSelect.setAttribute("aria-label", t("socket.msgType"));
-  for (const option of MESSAGE_TYPES) {
-    const node = document.createElement("option");
-    node.value = option.value;
-    node.textContent = option.label;
-    typeSelect.append(node);
-  }
   head.append(nameInput, typeSelect);
+
+  // Socket.IO 专属的发送选项：事件名（空 = message）与 Ack 勾选。
+  // ws/tcp 用不上，整行按 kind 显示/隐藏。
+  const ioRow = el("div", "sock-io");
+  const eventInput = document.createElement("input");
+  eventInput.type = "text";
+  eventInput.className = "sock-event-name";
+  eventInput.spellcheck = false;
+  eventInput.autocomplete = "off";
+  eventInput.placeholder = t("socket.eventPlaceholder");
+  const ackLabel = el("label", "sock-ack");
+  const ackBox = document.createElement("input");
+  ackBox.type = "checkbox";
+  const ackText = el("span", "", t("socket.ack"));
+  ackLabel.append(ackBox, ackText);
+  ioRow.append(eventInput, ackLabel);
 
   const payload = document.createElement("textarea");
   payload.className = "sock-message";
@@ -122,14 +140,34 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   const note = el("span", "sock-note");
   actions.append(sendButton, storeButton, note);
 
-  editor.append(head, payload, actions);
+  editor.append(head, ioRow, payload, actions);
   root.append(side, editor);
   host.append(root);
 
+  const isSocketIO = (): boolean => getRequest().kind === "socketio";
+
+  // 类型下拉按 kind 重建：Socket.IO 的二进制附件没实现，选项里不出现 Binary。
+  const drawTypes = (): void => {
+    const socketio = isSocketIO();
+    typeSelect.textContent = "";
+    for (const option of MESSAGE_TYPES) {
+      if (socketio && option.value === "binary") continue;
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      typeSelect.append(node);
+    }
+  };
+
   const applyDraft = (): void => {
+    const socketio = isSocketIO();
+    // 存成 Binary 的旧模板在 Socket.IO 下调不出去：回落到文本，别让它看起来能发。
+    if (socketio && draft.msgType === "binary") draft.msgType = "text";
     if (nameInput.value !== draft.name) nameInput.value = draft.name;
     if (typeSelect.value !== draft.msgType) typeSelect.value = draft.msgType;
+    if (eventInput.value !== draft.event) eventInput.value = draft.event;
     if (payload.value !== draft.payload) payload.value = draft.payload;
+    ioRow.hidden = !socketio;
     const placeholder = draft.msgType === "binary" ? t(BINARY_PLACEHOLDER) : t(TEXT_PLACEHOLDER);
     if (payload.placeholder !== placeholder) payload.placeholder = placeholder;
   };
@@ -263,7 +301,7 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     const id = target ?? newMessageId();
     const name = draft.name.trim() === "" ? t("socket.defaultName", { type: typeLabel(draft.msgType) }) : draft.name.trim();
     draft.name = name;
-    const message: SavedMessage = { id, name, msgType: draft.msgType, payload: draft.payload };
+    const message: SavedMessage = { id, name, msgType: draft.msgType, payload: draft.payload, event: draft.event };
     selectedId = id;
     updateRequest((state) => {
       const index = state.messages.findIndex((item) => item.id === id);
@@ -289,8 +327,18 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     draft.payload = payload.value;
   });
 
+  eventInput.addEventListener("input", () => {
+    draft.event = eventInput.value;
+  });
+
   sendButton.addEventListener("click", () => {
-    sendSocketMessage({ payload: draft.payload, isBinary: draft.msgType === "binary" });
+    const socketio = isSocketIO();
+    sendSocketMessage({
+      payload: draft.payload,
+      isBinary: draft.msgType === "binary",
+      event: socketio ? draft.event.trim() : "",
+      ack: socketio && ackBox.checked,
+    });
   });
 
   storeButton.addEventListener("click", () => {
@@ -302,19 +350,28 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   });
 
   let requestRef = getRequest();
+  let lastKind = getRequest().kind;
   let lastListKey = "";
   let lastStatus = getSocketSession().status;
 
   const sync = (): void => {
     const request = getRequest();
     if (request !== requestRef) {
-      // 换了请求（新建/载入条目）：编辑器回到空白草稿。
+      // 换了请求（新建/载入条目，或换了 kind）：编辑器回到空白草稿。
       requestRef = request;
       editing = false;
       selectedId = null;
       draft = emptyDraft();
+      lastKind = request.kind;
+      // 类型下拉的选项集合跟着 kind 变（Socket.IO 不提供 Binary）。
+      drawTypes();
       applyDraft();
       drawList();
+    } else if (request.kind !== lastKind) {
+      // kind 就地变了（事件名/Ack 行的可见性靠这里跟）：草稿留着，只重排控件。
+      lastKind = request.kind;
+      drawTypes();
+      applyDraft();
     }
     const key = JSON.stringify(request.messages.map((item) => [item.id, item.name]));
     if (key !== lastListKey) {
@@ -327,6 +384,7 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     lastStatus = getSocketSession().status;
   };
 
+  drawTypes();
   applyDraft();
   drawList();
   syncSend();
@@ -340,6 +398,8 @@ export function mountSocketComposer(host: HTMLElement): () => void {
     addButton.title = t("socket.addTemplateTitle");
     nameInput.placeholder = t("socket.namePlaceholder");
     typeSelect.setAttribute("aria-label", t("socket.msgType"));
+    eventInput.placeholder = t("socket.eventPlaceholder");
+    ackText.textContent = t("socket.ack");
     sendButton.textContent = t("common.send");
     storeButton.textContent = t("socket.store");
     storeButton.title = t("socket.storeTitle");
@@ -356,44 +416,133 @@ export function mountSocketComposer(host: HTMLElement): () => void {
   };
 }
 
-/** 设置页：WS 子协议（Sec-WebSocket-Protocol），TCP 不使用。 */
+/** Socket.IO 客户端版本：值直接映射 SocketConnectParams.version。 */
+const SOCKETIO_VERSIONS: { value: string; labelKey: string }[] = [
+  { value: "4", labelKey: "socket.sioVersion4" },
+  { value: "3", labelKey: "socket.sioVersion3" },
+];
+
+/** 设置页的文案槽：语言切换时按 key 重取，控件不重建（值都在请求态里）。 */
+interface TextSlot {
+  node: HTMLElement;
+  key: string;
+  /** 缺省刷 textContent；给了属性名就刷那个属性。 */
+  attribute?: "placeholder";
+}
+
+/**
+ * 设置页（kind 感知）：WS 是子协议（Sec-WebSocket-Protocol）；Socket.IO 是客户端版本
+ * 与握手路径；TCP 没有设置项。kind 一变整块重画——控件值都存在请求态里，重画不丢。
+ */
 export function mountSocketSettings(host: HTMLElement): () => void {
   host.textContent = "";
 
   const root = el("div", "sock-settings");
-  const field = el("label", "field");
-  const fieldLabel = el("span", "", t("socket.protocolLabel"));
-  field.append(fieldLabel);
-  const input = document.createElement("input");
-  input.type = "text";
-  input.spellcheck = false;
-  input.autocomplete = "off";
-  input.placeholder = t("socket.protocolPlaceholder");
-  input.value = getRequest().socketProtocol;
-  field.append(input);
-  const hint = el("p", "hint", t("socket.protocolHint"));
-  root.append(field, hint);
   host.append(root);
 
-  input.addEventListener("input", () => {
-    updateRequest((state) => {
-      state.socketProtocol = input.value;
+  let slots: TextSlot[] = [];
+
+  const track = (node: HTMLElement, key: string, attribute?: "placeholder"): void => {
+    slots.push(attribute === undefined ? { node, key } : { node, key, attribute });
+    if (attribute === undefined) node.textContent = t(key);
+    else node.setAttribute(attribute, t(key));
+  };
+
+  const fieldOf = (labelKey: string, control: HTMLElement): HTMLElement => {
+    const field = el("label", "field");
+    const label = el("span");
+    track(label, labelKey);
+    field.append(label, control);
+    return field;
+  };
+
+  const textInput = (
+    className: string,
+    placeholderKey: string,
+    value: string,
+    onInput: (next: string) => void,
+  ): HTMLInputElement => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = className;
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    track(input, placeholderKey, "placeholder");
+    input.value = value;
+    input.addEventListener("input", () => onInput(input.value));
+    return input;
+  };
+
+  const renderProtocol = (): void => {
+    const input = textInput("sock-protocol", "socket.protocolPlaceholder", getRequest().socketProtocol, (next) => {
+      updateRequest((state) => {
+        state.socketProtocol = next;
+      });
     });
-  });
+    const hint = el("p", "hint");
+    track(hint, "socket.protocolHint");
+    root.append(fieldOf("socket.protocolLabel", input), hint);
+  };
+
+  const renderSocketIO = (): void => {
+    const request = getRequest();
+
+    // 版本只影响握手：EIO4（默认）对上 Socket.IO v3/v4/v5，EIO3 对上 v2。
+    const version = document.createElement("select");
+    version.className = "sock-version";
+    for (const option of SOCKETIO_VERSIONS) {
+      const node = document.createElement("option");
+      node.value = option.value;
+      track(node, option.labelKey);
+      version.append(node);
+    }
+    // 空串是「没设过」的默认值，按 EIO4 显示。
+    version.value = request.socketIOVersion === "3" ? "3" : "4";
+    version.addEventListener("change", () => {
+      updateRequest((state) => {
+        state.socketIOVersion = version.value;
+      });
+    });
+
+    // 握手路径留空 = /socket.io/（首尾斜杠由后端补齐）。
+    const path = textInput("sock-path", "socket.sioPathPlaceholder", request.socketIOPath, (next) => {
+      updateRequest((state) => {
+        state.socketIOPath = next;
+      });
+    });
+    const hint = el("p", "hint");
+    track(hint, "socket.sioHint");
+
+    root.append(fieldOf("socket.sioVersionLabel", version), fieldOf("socket.sioPathLabel", path), hint);
+  };
+
+  const render = (): void => {
+    slots = [];
+    root.textContent = "";
+    const kind = getRequest().kind;
+    renderedKind = kind;
+    if (kind === "socketio") renderSocketIO();
+    else if (kind === "websocket") renderProtocol();
+  };
 
   let requestRef = getRequest();
+  let renderedKind: RequestKind = requestRef.kind;
   const unsubscribe = subscribe(() => {
     const request = getRequest();
-    if (request === requestRef) return;
+    // 请求换了（载入条目）或 kind 变了才重画：同一条请求里的输入不该被换掉。
+    if (request === requestRef && request.kind === renderedKind) return;
     requestRef = request;
-    if (input.value !== request.socketProtocol) input.value = request.socketProtocol;
+    render();
   });
-  // 语言切换：标签、占位符与说明重取（输入值是用户数据，保持原样）。
+  // 语言切换：标签、占位符与说明重取（输入值是用户数据，留在请求态里照旧显示）。
   const unsubscribeLang = onLangChange(() => {
-    fieldLabel.textContent = t("socket.protocolLabel");
-    input.placeholder = t("socket.protocolPlaceholder");
-    hint.textContent = t("socket.protocolHint");
+    for (const slot of slots) {
+      if (slot.attribute === undefined) slot.node.textContent = t(slot.key);
+      else slot.node.setAttribute(slot.attribute, t(slot.key));
+    }
   });
+
+  render();
 
   return () => {
     unsubscribe();

@@ -12,6 +12,7 @@ const URL_PLACEHOLDER_KEYS: Record<RequestKind, string> = {
   http: "urlbar.httpPlaceholder",
   websocket: "urlbar.websocketPlaceholder",
   tcp: "urlbar.tcpPlaceholder",
+  socketio: "urlbar.socketioPlaceholder",
 };
 
 export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => void {

@@ -13,11 +13,23 @@ export interface SocketLogEntry {
   direction: "send" | "receive" | "system";
   payload: string;
   isBinary: boolean;
+  /** Socket.IO 的事件名（收发 message 与 ack 回答都带）；ws/tcp 没有。 */
+  event?: string;
+  /** 这条 receive 是 Socket.IO 的 ack 回答（发送时勾了 Ack 才有）。 */
+  isAck?: boolean;
   /** 系统行的着色：错误红、其余灰。 */
   tone?: "error" | "muted";
   /** 系统行的词典键与插值变量：存结构而不是成品文案，切语言后按当前语言显示。 */
   i18n?: { key: string; vars?: Record<string, string | number> };
 }
+
+// 连接建立时给「已连接」行用的类型名：用户认的是产品名，不是 kind 字面量。
+// 键按 string 索引：SocketConnectParams.kind 是字符串，HTTP 用不到这里。
+const KIND_LABEL: Record<string, string> = {
+  websocket: "WebSocket",
+  tcp: "TCP",
+  socketio: "Socket.IO",
+};
 
 /** 日志行的显示文案：系统行按当前语言现取，收发消息是用户数据。 */
 export function logText(entry: SocketLogEntry): string {
@@ -116,6 +128,18 @@ function urlProblem(kind: RequestKind, url: string): string | null {
     }
     return null;
   }
+  if (kind === "socketio") {
+    // 地址是 http(s)://host[:port][/命名空间]：scheme 缺了后端也没法映射成 ws/wss，
+    // 所以和前端的 WS 校验同样在本地拦下。
+    if (target === "" || !/^https?:\/\//i.test(target)) return t("socket.urlNeedsSocketIO");
+    try {
+      const parsed = new URL(target);
+      if (parsed.host === "") return t("socket.urlNeedsSocketIO");
+    } catch {
+      return t("socket.urlNeedsSocketIO");
+    }
+    return null;
+  }
   if (kind === "tcp") {
     const marker = target.lastIndexOf(":");
     if (marker <= 0) return t("socket.urlNeedsTcp");
@@ -149,6 +173,8 @@ export function connectSocket(): void {
     params: wireValues(request.params),
     headers: wireValues(request.headers),
     protocol: request.socketProtocol.trim(),
+    path: request.socketIOPath.trim(),
+    version: request.socketIOVersion.trim(),
   };
 
   session.connId = params.id;
@@ -193,6 +219,13 @@ export function connectSocket(): void {
   });
 }
 
+// 事件监听在页面侧判定：「事件」页的勾选决定哪些到达事件进日志。每次到达都现查
+// getRequest()，所以切换开关不用重连。
+function listening(name: string): boolean {
+  if (name === "") return false;
+  return getRequest().socketEvents.some((item) => item.enabled && item.name.trim() === name);
+}
+
 function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
   if (session.connId !== params.id) return;
   switch (event.type) {
@@ -200,19 +233,33 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
       session.status = "open";
       session.handshakeHeaders = event.headers ?? [];
       session.protocol = event.protocol ?? "";
-      const label = params.kind === "websocket" ? "WebSocket" : "TCP";
+      const label = KIND_LABEL[params.kind] ?? params.kind;
       const protocol = session.protocol === "" ? "" : t("socket.protocolSuffix", { protocol: session.protocol });
       appendLog(systemMessage("socket.connected", { kind: label, url: params.url, protocol }, "muted"));
+      // 一个事件都没勾监听时日志会一直空着，容易被当成连接坏了：明说一句。
+      if (params.kind === "socketio" && !getRequest().socketEvents.some((item) => item.enabled)) {
+        appendLog(systemMessage("socket.noListeners", undefined, "muted"));
+      }
       return;
     }
     case "message": {
-      appendLog({
+      const direction = event.direction === "send" ? "send" : "receive";
+      const name = event.event ?? "";
+      const isAck = event.isAck === true;
+      // Socket.IO 的事件监听在页面侧过滤：后端推全部事件，只有「事件」页里勾了监听
+      // 的事件才进实时响应；ack 回答是本次发送的直接结果，恒显示。开关即时生效，
+      // 不必重连。
+      if (params.kind === "socketio" && direction === "receive" && !isAck && !listening(name)) return;
+      const entry: SocketLogEntry = {
         id: newId(),
         at: event.at > 0 ? event.at : Date.now(),
-        direction: event.direction === "send" ? "send" : "receive",
+        direction,
         payload: event.payload ?? "",
         isBinary: event.isBinary === true,
-      });
+      };
+      if (name !== "") entry.event = name;
+      if (isAck) entry.isAck = true;
+      appendLog(entry);
       return;
     }
     case "error": {
@@ -248,13 +295,26 @@ function closeText(event: SocketEvent): string {
 // sendSocketMessage writes one message on the live connection; the log line
 // comes back from the backend as a direction:"send" event, so it is not faked
 // here.
-export function sendSocketMessage(message: { payload: string; isBinary: boolean }): void {
+export function sendSocketMessage(message: {
+  payload: string;
+  isBinary: boolean;
+  /** Socket.IO 事件名；空 = "message"（ws/tcp 忽略）。 */
+  event?: string;
+  /** 要求 Socket.IO 服务器回 ack（ws/tcp 忽略）。 */
+  ack?: boolean;
+}): void {
   const connId = session.connId;
   if (connId === null || session.status !== "open") {
     updateResponse({ error: t("socket.notConnected") });
     return;
   }
-  void SocketService.send({ id: connId, payload: message.payload, isBinary: message.isBinary }).catch(
+  void SocketService.send({
+    id: connId,
+    payload: message.payload,
+    isBinary: message.isBinary,
+    event: message.event ?? "",
+    ack: message.ack === true,
+  }).catch(
     (error: unknown) => {
       const text = error instanceof Error ? error.message : String(error);
       updateResponse({ error: text });

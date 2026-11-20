@@ -152,12 +152,14 @@ export interface SavedMessage {
   /** "text" | "json" | "xml" | "html" | "binary" */
   msgType: string;
   payload: string;
+  /** Event 是 Socket.IO 模板的事件名，空 = "message"；ws/tcp 为空。 */
+  event: string;
 }
 
 export interface SavedRequest {
   id: string;
   name: string;
-  /** "http" | "websocket" | "tcp"；空 = http（兼容旧 .band） */
+  /** "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band） */
   kind: string;
   method: string;
   url: string;
@@ -178,10 +180,26 @@ export interface SavedRequest {
   /** 后执行脚本；空 = 无 */
   postScript: string;
   assertions: SavedAssertion[];
-  /** 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求） */
+  /** WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求） */
   messages: SavedMessage[];
   /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用 */
   socketProtocol: string;
+  /** Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求） */
+  socketEvents: SavedSocketEvent[];
+  /** Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用 */
+  socketIOVersion: string;
+  /** Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用 */
+  socketIOPath: string;
+}
+
+export interface SavedSocketEvent {
+  id: string;
+  /** 事件名：发送时作为 EVENT 包的事件名 */
+  name: string;
+  /** 停用的事件不出现在发送消息页 */
+  enabled: boolean;
+  /** 备注，不发送 */
+  description: string;
 }
 
 /** ScriptLog is one console.log/warn/error call from a pre/post script. */
@@ -202,20 +220,27 @@ export interface ScriptTest {
   error: string;
 }
 
-/** SocketConnectParams 发起一条 WebSocket（ws:// / wss://）或 TCP 连接。 */
+/** SocketConnectParams 发起一条 WebSocket（ws:// / wss://）、TCP 或 Socket.IO 连接。 */
 export interface SocketConnectParams {
   /** 前端生成的连接 id（uuid）；Send/Disconnect 凭它定位连接 */
   id: string;
-  /** "websocket" | "tcp" */
+  /** "websocket" | "tcp" | "socketio" */
   kind: string;
-  /** websocket：ws:// 或 wss:// 地址；tcp：host:port */
+  /** websocket：ws:// 或 wss:// 地址；socketio：http(s)://host[:port][/命名空间]；tcp：host:port */
   url: string;
-  /** 查询参数（仅 WS 使用）：拼到 URL（已有查询串则追加） */
+  /** 查询参数（WS/Socket.IO 使用）：拼到 URL 或握手地址（已有查询串则追加；socketio 不覆盖 EIO/transport） */
   params: KeyValue[];
-  /** WS 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头 */
+  /** WS/Socket.IO 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头 */
   headers: KeyValue[];
-  /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个 */
+  /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个；socketio 忽略 */
   protocol: string;
+  /** Path 是 Socket.IO 的 Engine.IO 握手路径，空 = "/socket.io/"（缺首尾斜杠由后端补齐）；仅 socketio 使用。 */
+  path: string;
+  /**
+   * Version 是 Socket.IO 协议版本："4"（默认 = EIO4 / Socket.IO v3+）|
+   * "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
+   */
+  version: string;
 }
 
 /** SocketEvent 是连接生命周期事件，Connect 存续期间经 stream 推送。 */
@@ -237,6 +262,10 @@ export interface SocketEvent {
   headers?: KeyValue[];
   /** open：实际协商出的子协议 */
   protocol?: string;
+  /** Event 是 Socket.IO 的事件名（收发 message 与 ack 回答都带）；ws/tcp 为空。 */
+  event?: string;
+  /** IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。 */
+  isAck?: boolean;
 }
 
 /** SocketSendParams 在已建立的连接上发送一条消息。 */
@@ -245,6 +274,10 @@ export interface SocketSendParams {
   /** 文本 = 原文；二进制 = base64 */
   payload: string;
   isBinary: boolean;
+  /** Event 是 Socket.IO 事件名（空 = "message"）；ws/tcp 忽略。 */
+  event: string;
+  /** Ack 要求 Socket.IO 服务器对这条事件回 ack（连接内自增 id）；ws/tcp 忽略。 */
+  ack: boolean;
 }
 
 export interface WorkspaceData {
@@ -314,8 +347,10 @@ export const WorkspaceService = {
 } as const;
 
 /**
- * SocketService opens WebSocket and TCP connections the page talks over.
- * Every exported method here is bound to the frontend, so helpers stay unexported.
+ * SocketService opens WebSocket, TCP and Socket.IO connections the page talks
+ * over. The connections themselves live in backend/protocol; this shell maps
+ * the page's contract types onto it. Every exported method here is bound to the
+ * frontend, so helpers stay unexported.
  */
 export const SocketService = {
   /**

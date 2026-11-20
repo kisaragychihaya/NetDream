@@ -9,6 +9,7 @@ import { mountResponseView } from "./components/responseView";
 import { mountScriptEditor } from "./components/scriptEditor";
 import { mountSettings } from "./components/settings";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
+import { mountSocketEventsEditor } from "./components/socketEventsEditor";
 import { mountSocketPanel } from "./components/socketPanel";
 import { createTabs, type TabDef } from "./components/tabs";
 import { mountUrlBar } from "./components/urlBar";
@@ -63,6 +64,14 @@ function requestTabs(kind: RequestKind): TabDef[] {
         { id: "query", label: t("tabs.wsQuery") },
         { id: "settings", label: t("tabs.settings") },
       ];
+    case "socketio":
+      return [
+        { id: "messages", label: t("tabs.messages") },
+        { id: "events", label: t("tabs.events") },
+        { id: "headers", label: t("tabs.wsHeaders") },
+        { id: "query", label: t("tabs.wsQuery") },
+        { id: "settings", label: t("tabs.settings") },
+      ];
     case "tcp":
       return [{ id: "messages", label: t("tabs.messages") }];
     default:
@@ -101,7 +110,19 @@ const socketResContent = need<HTMLElement>("#socket-res-content");
 const sidebar = need<HTMLElement>("#workspace-sidebar");
 
 const views = new Map<string, HTMLElement>();
-for (const id of ["headers", "query", "path", "body", "auth", "cookies", "pre", "post", "messages", "settings"]) {
+for (const id of [
+  "headers",
+  "query",
+  "path",
+  "body",
+  "auth",
+  "cookies",
+  "pre",
+  "post",
+  "messages",
+  "events",
+  "settings",
+]) {
   const view = document.createElement("div");
   view.className = "req-view";
   view.dataset.view = id;
@@ -403,6 +424,7 @@ mountKVTable(viewOf("path"), {
 mountBodyEditor(viewOf("body"));
 mountAuthEditor(viewOf("auth"));
 mountSocketComposer(viewOf("messages"));
+mountSocketEventsEditor(viewOf("events"));
 mountSocketSettings(viewOf("settings"));
 
 mountKVTable(viewOf("cookies"), {

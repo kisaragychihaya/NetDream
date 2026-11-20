@@ -8,6 +8,7 @@ import type {
   KeyValue,
   SavedMessage,
   SavedRequest,
+  SavedSocketEvent,
   ScriptLog,
   ScriptTest,
   SSEEvent,
@@ -23,11 +24,11 @@ const SAVE_DELAY_MS = 300;
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
 
-/** 编辑器三态：HTTP 请求、WebSocket 连接、TCP 连接。 */
-export const REQUEST_KINDS = ["http", "websocket", "tcp"] as const;
+/** 编辑器四种类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接。 */
+export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio"] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
-/** WS/TCP 消息模板的类型（SavedMessage.msgType）。 */
+/** WS/Socket.IO 消息模板的类型（SavedMessage.msgType）。 */
 export const MESSAGE_TYPES = ["text", "json", "xml", "html", "binary"] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 
@@ -83,10 +84,16 @@ export interface RequestState {
   timeout: number;
   http2: boolean;
   assertions: AssertionRule[];
-  /** WS/TCP 的已存消息模板。 */
+  /** WS/TCP/Socket.IO 的已存消息模板。 */
   messages: SavedMessage[];
   /** WS 子协议（Sec-WebSocket-Protocol），逗号分隔。 */
   socketProtocol: string;
+  /** Socket.IO 事件定义（发送消息页的事件列表）。 */
+  socketEvents: SavedSocketEvent[];
+  /** Socket.IO 协议版本："4"（默认）| "3"。 */
+  socketIOVersion: string;
+  /** Socket.IO 的 Engine.IO 握手路径；空 = /socket.io/。 */
+  socketIOPath: string;
   /** 预执行脚本；空 = 不执行。 */
   preScript: string;
   /** 后执行脚本；空 = 不执行。 */
@@ -153,6 +160,9 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     assertions: [],
     messages: [],
     socketProtocol: "",
+    socketEvents: [],
+    socketIOVersion: "",
+    socketIOPath: "",
     preScript: "",
     postScript: "",
   };
@@ -413,9 +423,25 @@ function hydrateMessages(value: unknown): SavedMessage[] {
       name: text(item.name),
       msgType: oneOf(item.msgType, MESSAGE_TYPES, "text"),
       payload: text(item.payload),
+      event: text(item.event),
     });
   }
   return messages;
+}
+
+function hydrateSocketEvents(value: unknown): SavedSocketEvent[] {
+  if (!Array.isArray(value)) return [];
+  const events: SavedSocketEvent[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    events.push({
+      id: text(item.id) || newId(),
+      name: text(item.name),
+      enabled: flag(item.enabled, true),
+      description: text(item.description),
+    });
+  }
+  return events;
 }
 
 function hydrate(source: Record<string, unknown>): RequestState {
@@ -445,6 +471,9 @@ function hydrate(source: Record<string, unknown>): RequestState {
     assertions: hydrateAssertions(source.assertions),
     messages: hydrateMessages(source.messages),
     socketProtocol: text(source.socketProtocol),
+    socketEvents: hydrateSocketEvents(source.socketEvents),
+    socketIOVersion: text(source.socketIOVersion),
+    socketIOPath: text(source.socketIOPath),
     preScript: text(source.preScript),
     postScript: text(source.postScript),
   };
@@ -626,6 +655,9 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     })),
     messages: hydrateMessages(saved.messages),
     socketProtocol: text(saved.socketProtocol),
+    socketEvents: hydrateSocketEvents(saved.socketEvents),
+    socketIOVersion: text(saved.socketIOVersion),
+    socketIOPath: text(saved.socketIOPath),
     preScript: text(saved.preScript),
     postScript: text(saved.postScript),
   };
@@ -719,6 +751,9 @@ function newId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+/** 连接类 kind 在自动命名里的前缀；HTTP 没有类型前缀，用方法名。 */
+const KIND_PREFIX: Partial<Record<RequestKind, string>> = { websocket: "WS", socketio: "SIO" };
+
 function generatedName(kind: RequestKind, method: string, url: string): string {
   const target = url.trim();
   let name: string;
@@ -732,7 +767,7 @@ function generatedName(kind: RequestKind, method: string, url: string): string {
     } catch {
       // A URL without a scheme keeps its raw form.
     }
-    name = `${kind === "websocket" ? "WS" : method} ${host}`.trim();
+    name = `${KIND_PREFIX[kind] ?? method} ${host}`.trim();
   }
   return name.length > 40 ? name.slice(0, 40) : name;
 }
@@ -803,6 +838,9 @@ export function snapshotCurrent(): SavedRequest {
     })),
     messages: state.messages.map((message) => ({ ...message })),
     socketProtocol: state.socketProtocol,
+    socketEvents: state.socketEvents.map((event) => ({ ...event })),
+    socketIOVersion: state.socketIOVersion,
+    socketIOPath: state.socketIOPath,
     preScript: state.preScript,
     postScript: state.postScript,
   };

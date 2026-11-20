@@ -1,4 +1,4 @@
-package main
+package protocol
 
 import (
 	"bufio"
@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/egoist/mygo"
 )
 
 // maxSSELineBytes is the longest line of an event stream we accept; a server
@@ -23,34 +21,40 @@ func isEventStream(h http.Header) bool {
 	return err == nil && mediaType == "text/event-stream"
 }
 
-// sseSink is where the SSE path pushes its messages; the bound method's
-// *mygo.Channel[SSEMessage] is the one sink there is.
-type sseSink interface {
-	Send(SSEMessage) error
-}
-
-// streamEvents pushes the response head and then every event of body to the
-// page, and returns the meta of the stream once it ends.
-func streamEvents(body io.Reader, meta APIResponse, sink sseSink, start time.Time) (APIResponse, error) {
-	if err := sink.Send(SSEMessage{Open: &SSEOpen{
-		Status:     meta.Status,
-		StatusText: meta.StatusText,
-		Proto:      meta.Proto,
-		Headers:    meta.Headers,
-	}}); err != nil {
-		return APIResponse{}, err
+// streamEvents pushes the response head and then every event of body to emit,
+// and returns the meta of the stream once it ends.
+func streamEvents(body io.Reader, meta HTTPResponse, emit Emit, start time.Time) (HTTPResponse, error) {
+	if emit != nil {
+		if err := emit(SSEMessage{Open: &SSEOpen{
+			Status:     meta.Status,
+			StatusText: meta.StatusText,
+			Proto:      meta.Proto,
+			Headers:    meta.Headers,
+		}}); err != nil {
+			return HTTPResponse{}, err
+		}
 	}
 
 	size := 0
+	var emitErr error
 	err := parseSSE(body, func(event SSEEvent) error {
 		size += len(event.Data)
-		return sink.Send(SSEMessage{Event: &event})
-	})
-	if err != nil {
-		if errors.Is(err, mygo.ErrChannelClosed) {
-			return APIResponse{}, err
+		if emit == nil {
+			return nil
 		}
-		return APIResponse{}, fmt.Errorf("reading the event stream failed: %w", err)
+		if err := emit(SSEMessage{Event: &event}); err != nil {
+			emitErr = err
+			return err
+		}
+		return nil
+	})
+	if emitErr != nil {
+		// The sink ended the stream (the page closed its channel): that is not
+		// a parse failure, so it travels back unwrapped.
+		return HTTPResponse{}, emitErr
+	}
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("reading the event stream failed: %w", err)
 	}
 
 	meta.TimeMS = time.Since(start).Milliseconds()

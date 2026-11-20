@@ -9,14 +9,19 @@
 backend/
   main.go              # main()：Bind + 窗口（窗口常量）+ OnFileDrop 激活（拖入文件拿路径）+ guardWindow
   close.go             # 窗口关闭守卫：OnClose 否决 + workspace:closeRequested 事件 + SetDirty/CloseWindow 支撑
-  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedRequest、WorkspaceData、WorkspaceFile
-  service.go           # RequestService：Send、PickFile（仅有的两个导出方法）
-  request.go           # 未导出 helper：URL/Body 构造、头与 Cookie、响应整形、截断、h2c 传输
+  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedSocketEvent、SavedRequest、WorkspaceData、WorkspaceFile
+  service.go           # RequestService：Send（脚本编排）、PickFile（仅有的两个导出方法）+ APIRequest↔protocol.HTTPRequest / APIResponse↔protocol.HTTPResponse 的机械映射
+  socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
   ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
-  sse.go               # SSE：Content-Type 判定、Open/Event 推送、事件流解析器
-  socket.go            # SocketService：Connect/Send/Disconnect + 连接注册表 + WS/TCP 读写循环
   workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写
+  protocol/            # 网络协议实现（package protocol，不 import main；契约类型由 main 映射进来）
+    types.go           # 自有的协议类型：KeyValue、FormField、AuthInfo、HTTPRequest/HTTPResponse、ResponseCookie、SSEOpen/SSEEvent/SSEMessage、Emit、ConnectParams、SendParams、SocketEvent、Sink
+    http.go            # Do：URL/Body 构造、头与 Cookie、认证、超时、h2c、响应整形与截断（代理见 proxy*.go）
+    sse.go             # SSE：Content-Type 判定、Open/Event 经 Emit 回调推送、事件流解析器
+    socket.go          # 连接注册表 + WS/TCP 读写循环 + Connect/Send/Disconnect
+    socketio.go        # Socket.IO（Socket.IO v5/EIO4 与 v2/EIO3）：握手、心跳、EVENT/ACK/CONNECT_ERROR、二进制占位
+    proxy*.go          # 系统代理（Windows 注册表 / macOS scutil / 其他平台直连），build tag 跟文件走
 frontend/
   index.html           # 静态骨架（id 见下）
   src/
@@ -33,7 +38,8 @@ frontend/
       authEditor.ts    # 认证（none/basic/bearer）
       scriptEditor.ts  # Monaco 脚本编辑器（预/后执行脚本页，与 state 双向绑定）
       responseView.ts  # 响应区（选项卡 + 美化/原生/预览 + 头/Cookie/实际请求/控制台）
-      socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉
+      socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉（Socket.IO 另有事件名/Ack）+ 设置页（按 kind）
+      socketEventsEditor.ts # Socket.IO「事件」页：事件名 + 监听开关 + 描述
       socketPanel.ts   # Socket 响应区：实时响应日志（发送/接收）+ 握手响应头
       assertionsPanel.ts # 断言与校验侧栏
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
@@ -43,17 +49,22 @@ frontend/
 scripts/
   sse-demo.ts          # 本地 SSE 测试服务器（http://localhost:8123/sse）
   socket-demo.ts       # 本地 WS/TCP 回显测试服务器（ws://localhost:8124，tcp://localhost:8125）
+  socketio-demo.ts     # 本地 Socket.IO 演示服务器（http://localhost:6021/，命名空间 /admin）
 resources/
   icon.png             # 应用图标（正方形 PNG）：mygo.config.ts 的 icon 指向它，
                        # 用于窗口标题栏/任务栏/打包产物；frontend/icon.png 是同一份拷贝（favicon）
 ```
 
-## IPC 契约（backend/types.go + backend/service.go + backend/workspace.go，唯一事实来源）
+## IPC 契约（backend/types.go + backend/service.go + backend/socket.go + backend/workspace.go，唯一事实来源）
 
 `mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{})` 绑定。注意：**结构体的所有导出方法都会被绑定**，
 各 Service 上只允许出现契约列出的导出方法（helper 必须小写或未导出）。
 方法在自己的 goroutine 运行；第一个参数可为 `context.Context`（页面关闭自动取消）。
 方法返回可以是 `error`、`(T, error)` 或无返回（mygo 反射均支持）。
+
+**契约类型必须留在 main 包**：`mygo generate` 的文档注释提取只读绑定方法所在包的源码目录
+（`backend/`），跨包类型会丢掉注释。网络协议实现放在 `backend/protocol`，它定义自己的一套
+类型（`protocol.KeyValue`、`protocol.HTTPRequest` …），由 main 做机械映射；protocol 不 import main。
 
 ```go
 type KeyValue struct {
@@ -174,14 +185,19 @@ type SSEMessage struct {
 	Event *SSEEvent `json:"event,omitempty"`
 }
 
-// SocketConnectParams 发起一条 WebSocket（ws:// / wss://）或 TCP 连接。
+// SocketConnectParams 发起一条 WebSocket（ws:// / wss://）、TCP 或 Socket.IO 连接。
 type SocketConnectParams struct {
 	ID       string     `json:"id"`       // 前端生成的连接 id（uuid）；Send/Disconnect 凭它定位连接
-	Kind     string     `json:"kind"`     // "websocket" | "tcp"
-	URL      string     `json:"url"`      // websocket：ws:// 或 wss:// 地址；tcp：host:port
-	Params   []KeyValue `json:"params"`   // 查询参数（仅 WS 使用）：拼到 URL（已有查询串则追加）
-	Headers  []KeyValue `json:"headers"`  // WS 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头
-	Protocol string     `json:"protocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个
+	Kind     string     `json:"kind"`     // "websocket" | "tcp" | "socketio"
+	URL      string     `json:"url"`      // websocket：ws:// 或 wss:// 地址；socketio：http(s)://host[:port][/命名空间]；tcp：host:port
+	Params   []KeyValue `json:"params"`   // 查询参数（WS/Socket.IO 使用）：拼到 URL 或握手地址（已有查询串则追加；socketio 不覆盖 EIO/transport）
+	Headers  []KeyValue `json:"headers"`  // WS/Socket.IO 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头
+	Protocol string     `json:"protocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个；socketio 忽略
+	// Path 是 Socket.IO 的 Engine.IO 握手路径，空 = "/socket.io/"（缺首尾斜杠由后端补齐）；仅 socketio 使用。
+	Path string `json:"path"`
+	// Version 是 Socket.IO 协议版本："4"（默认 = EIO4 / Socket.IO v3+）|
+	// "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
+	Version string `json:"version"`
 }
 
 // SocketSendParams 在已建立的连接上发送一条消息。
@@ -189,6 +205,10 @@ type SocketSendParams struct {
 	ID       string `json:"id"`
 	Payload  string `json:"payload"` // 文本 = 原文；二进制 = base64
 	IsBinary bool   `json:"isBinary"`
+	// Event 是 Socket.IO 事件名（空 = "message"）；ws/tcp 忽略。
+	Event string `json:"event"`
+	// Ack 要求 Socket.IO 服务器对这条事件回 ack（连接内自增 id）；ws/tcp 忽略。
+	Ack bool `json:"ack"`
 }
 
 // SocketEvent 是连接生命周期事件，Connect 存续期间经 stream 推送。
@@ -202,12 +222,19 @@ type SocketEvent struct {
 	Reason    string     `json:"reason,omitempty"`    // 错误/关闭原因
 	Headers   []KeyValue `json:"headers,omitempty"`   // open：WS 握手响应头（按 key 排序、同名合并）
 	Protocol  string     `json:"protocol,omitempty"`  // open：实际协商出的子协议
+	// Event 是 Socket.IO 的事件名（收发 message 与 ack 回答都带）；ws/tcp 为空。
+	Event string `json:"event,omitempty"`
+	// IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。
+	IsAck bool `json:"isAck,omitempty"`
 }
 ```
 
 方法：
 
 - `Send(ctx context.Context, req APIRequest, stream *mygo.Channel[SSEMessage]) (APIResponse, error)` — 发送请求。
+  实现在 `backend/protocol/http.go`（`Do`）+ `sse.go`：main 只做脚本编排与类型映射，
+  SSE 的 `stream` 由 main 适配成 `protocol.Emit` 回调（`func(protocol.SSEMessage) error`），
+  protocol 不依赖 IPC 的 Channel。
   - 普通响应：stream 不使用（Send 返回时自动关闭），行为同前；
   - SSE 响应（去参数后的 Content-Type 是 `text/event-stream`）：经 stream 先推一个
     `SSEMessage{Open}`（状态/协议/响应头），随后每条事件推 `SSEMessage{Event}`；
@@ -260,17 +287,21 @@ type SocketEvent struct {
 - `PickFile() (string, error)` — 原生打开文件对话框（`mygo.Dialog.Open`），
   用户取消时返回 `("", nil)`。
 
-### SocketService（backend/socket.go）
+### SocketService（backend/socket.go + backend/protocol）
 
-WebSocket / TCP 流式调试。依赖 `github.com/gorilla/websocket`。所有连接登记在
-包级注册表（`map[string]*socketConn` + `sync.Mutex`）中，支持多条并发连接；
+WebSocket / TCP / Socket.IO 流式调试。契约类型（`SocketConnectParams` 等）留在 main 包，
+`SocketService` 只是薄壳：`Connect/Send/Disconnect` 转调 `netdream/backend/protocol`，
+并把 main 的 `*mygo.Channel[SocketEvent]` 适配成 `protocol.Sink`（`Send(protocol.SocketEvent) error`）；
+协议实现在 `backend/protocol`（`socket.go` 连接管理、`socketio.go` Socket.IO）。
+依赖 `github.com/gorilla/websocket`。所有连接登记在该包的包级注册表
+（`map[string]*socketConn` + `sync.Mutex`）中，支持多条并发连接；
 `*socketConn` 内再有写互斥（WS/TCP 写不能并发）。helper（注册表、query 拼接、
-TCP 文本判定）一律未导出。
+TCP 文本判定、Socket.IO 包编解码）一律未导出。
 
 - `Connect(ctx context.Context, params SocketConnectParams, stream *mygo.Channel[SocketEvent]) error`
   — 建立连接，方法在连接存续期间不返回（等同 SSE 的 Send）。
   - 注册表条目在 dial 前就位（含 cancel），因此 **Disconnect 在 dial 进行中也能生效**；
-    id 重复返回 error。
+    id 重复返回 error。kind 只认 `"websocket"` / `"tcp"` / `"socketio"`。
   - WS：URL 必须是 `ws://` 或 `wss://`（其他 scheme 报错）；Params 拼到查询串；
     Headers 过滤 gorilla 托管头（大小写不敏感）：`Host`、`Upgrade`、`Connection`、
     `Sec-Websocket-Key`、`Sec-Websocket-Version`、`Sec-Websocket-Extensions`，
@@ -279,7 +310,7 @@ TCP 文本判定）一律未导出。
     `websocket.Dialer{HandshakeTimeout: 30s}` + `ReadLimit(10MiB)`，
     默认 ping/pong/close 控制帧处理。
   - TCP：`net.DialTimeout("tcp", url, 30s)`，URL 即 `host:port`。
-  - 成功 → 推 `open`（WS 带握手响应头——按 key 排序、同名合并，及协商子协议；
+  - 成功 → 推 `open`（WS/Socket.IO 带握手响应头——按 key 排序、同名合并，WS 还带协商子协议；
     TCP 无头），随后进入读循环：WS 每条消息推一条 `message`（text 原文 /
     binary base64+isBinary）；TCP 每次 `Read`（≤64KiB）推一条 `message`，
     `utf8.Valid` 视为文本，否则 base64+isBinary。
@@ -295,6 +326,63 @@ TCP 文本判定）一律未导出。
   幂等（不存在则静默返回）；注册表在 Connect 的 defer 中移除。
 - `Channel.Send` 自带互斥（mygo 实现保证并发推送有序），读循环与 Send
   从各自 goroutine 共推一个通道是安全的。
+
+#### Socket.IO 支持（backend/protocol/socketio.go）
+
+直连 WebSocket 传输的 Socket.IO 客户端（Socket.IO v5 协议 / Engine.IO v4，以及
+Version="3" 时的 Socket.IO v2 / Engine.IO v3）；**不实现 long-polling，也不实现二进制附件重组**。
+
+- 地址解析：URL 形如 `http(s)://host[:port][/命名空间]`（也接受 ws/wss）。握手地址 =
+  `Path`（默认 `/socket.io/`，缺首尾斜杠自动补齐）+ `?EIO=<4|3>&transport=websocket`
+  + 用户 Params（追加；`EIO`/`transport` 由后端 `Set`，用户参数不能覆盖）。
+  scheme 映射 http→ws、https→wss；URL 的 path 非空且非 `/` 时作为 Socket.IO 命名空间
+  （去掉尾部 `/`，如 `http://h/admin/` → `/admin`），命名空间不进握手地址，
+  只出现在 CONNECT/EVENT/ACK/DISCONNECT 包里（`40/admin,`、`42/admin,[...]`）。
+- 握手：读 `0{...}` Engine.IO open（取 `pingInterval`/`pingTimeout`，毫秒，缺失按
+  Socket.IO 默认 25s/20s）→ 发 CONNECT（有命名空间则 `40/<nsp>,`）→ 等 `40{"sid":...}`
+  （EIO3 是裸 `40`）即成功；`44...`（EIO4）或 `4{"message":...}`（EIO3）视为 CONNECT_ERROR，
+  推 `error` 事件并让 Connect 返回 error。握手阶段用 30s 读截止。
+- 心跳：EIO4 由服务器发 `2`，客户端立即回 `3`（带 payload 则原样带回）；读截止 =
+  `pingInterval + pingTimeout`，每收到一个包就刷新，静默超时按连接死亡推 `close`。
+  EIO3 方向相反：客户端按 `pingInterval` 起 ticker 发 `2`，服务器回 `3`，ticker 随
+  ctx（连接关闭）退出。
+- 收发事件：`42["event",arg]`（带命名空间 `42/admin,[...]`，带 ack id `42/admin,<id>[...]`）；
+  发送时 Payload 先试 `json.Unmarshal`，成功则作为 JSON 值、失败则作为字符串，
+  Event 空 = `"message"`。`Ack=true` 时分配连接内自增 id 并记入 pending 表；
+  收到 `43<id>[...]` 推 `message{event: 原事件名, isAck: true, payload: ack 参数的 JSON}`，
+  pending 表在连接关闭时清空（不做 ack 超时）。
+- 接收 EVENT：解析事件名与参数，推 `message{direction:"receive", event, payload: 参数数组的 JSON 原文}`；
+  入站事件带 ack id 时立即回空 ack（`43<id>[]`）——调试器不是服务端处理器，不让服务器白等。
+- 类型 5/6（二进制事件/ack）：不重组附件，推一条 payload 为占位 JSON 的 `message`
+  （含 attachments 数量），随后按数量跳过二进制帧；意料之外的二进制帧按 base64 推
+  `message{isBinary:true}`。
+- 断开：收到 `41`/Engine.IO `1` → 推 `close` 并结束；主动断开先发 `41`（有命名空间则
+  `41/<nsp>,`）再关 WebSocket（不走 WS CloseMessage）。
+
+前端目前已把 Socket.IO 接入为与 WS/TCP 平级的编辑器 kind（`REQUEST_KINDS` 含 `"socketio"`）。
+后端通路保持不变，前端行为见「行为细节」节：
+
+- **URL 与入口**：URL 栏接受 `http(s)://host[:port][/命名空间]`（本地校验：必须以
+  `http://` / `https://` 开头且 host 非空，否则提示 `socket.urlNeedsSocketIO`）；
+  侧栏「＋ 新建请求」有「Socket.IO 连接」一项，列表徽标 `IO`（`.m-badge.m-sio`）；
+  自动命名为 `SIO host/path`。
+- **请求页签**：发送消息 / 事件 / 请求头 / 请求参数 / 设置（`tabs.events`）。
+  「请求头」「请求参数」与 WS 共用同一套编辑器（握手请求头、握手查询参数）。
+- **事件过滤（Apipost 语义）**：「事件」页维护 `socketEvents`（事件名 + 监听开关 + 描述），
+  后端推送全部入站事件，**过滤在 socket.ts 收事件时做**：`isAck` 为 true 的回答恒进日志，
+  其余只有事件名在 `socketEvents` 里且 `enabled` 才进，否则丢弃。开关随时生效，
+  不需要重连；一个都没勾时 open 之后追加一条灰色提示（`socket.noListeners`），
+  避免日志一直空着被误认为连接坏了。
+- **发送**：发送区多一行「事件名 + Ack」控件（ws/tcp 隐藏）。事件名留空 = 发 `"message"`；
+  勾 Ack 时后端分配 ack id，回答以 `isAck:true` 的 receive 行显示并带 `ack` 标记。
+  该 kind 下类型下拉不提供 Binary（后端未实现二进制附件重组），存成 Binary 的模板回落为文本。
+  模板（`SavedMessage`）带上 `event`，ws/tcp 下恒为空。
+- **设置**：客户端版本（`socketIOVersion`：`"4"` = Socket.IO v3/v4/v5 / EIO4，默认；
+  `"3"` = Socket.IO v2 / EIO3）与握手路径（`socketIOPath`，空 = `/socket.io/`）。
+  设置页按 kind 重画：WS 显示子协议，Socket.IO 显示这两项，TCP 无设置项。
+- **日志展示**：行内事件名 chip（`.sock-event`）、ack 标记、二进制 `base64` 标记；
+  「复制全部」的文本同样带 `[事件名 ack base64]`。计数 tooltip 按 kind 区分
+  （`socket.wsConnection` / `socket.sioConnection` / `socket.tcpConnection`）。
 
 ### 工作区（.band）
 
@@ -339,17 +427,26 @@ type SavedAssertion struct { // 前端 AssertionRule 的持久化形态
 	Value   string `json:"value"`
 }
 
-type SavedMessage struct { // WS/TCP 的已存消息模板（发送消息页左侧列表）
+type SavedMessage struct { // WS/TCP/Socket.IO 的已存消息模板（发送消息页左侧列表）
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	MsgType string `json:"msgType"` // "text" | "json" | "xml" | "html" | "binary"
 	Payload string `json:"payload"`
+	// Event 是 Socket.IO 模板的事件名，空 = "message"；ws/tcp 为空。
+	Event string `json:"event"`
+}
+
+type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的事件列表）
+	ID          string `json:"id"`
+	Name        string `json:"name"`        // 事件名：发送时作为 EVENT 包的事件名
+	Enabled     bool   `json:"enabled"`     // 停用的事件不出现在发送消息页
+	Description string `json:"description"` // 备注，不发送
 }
 
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID         string           `json:"id"`
 	Name       string           `json:"name"`
-	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp"；空 = http（兼容旧 .band）
+	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band）
 	Method     string           `json:"method"`
 	URL        string           `json:"url"`
 	Params     []KeyValue       `json:"params"`
@@ -367,8 +464,11 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	PreScript  string           `json:"preScript"`  // 预执行脚本；空 = 无
 	PostScript string           `json:"postScript"` // 后执行脚本；空 = 无
 	Assertions []SavedAssertion `json:"assertions"`
-	Messages   []SavedMessage   `json:"messages"`       // 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求）
+	Messages   []SavedMessage   `json:"messages"`       // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol string       `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
+	SocketEvents   []SavedSocketEvent `json:"socketEvents"` // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
+	SocketIOVersion string      `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
+	SocketIOPath    string      `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
 }
 
 type WorkspaceData struct {
@@ -405,7 +505,7 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
       <nav id="res-tabs"></nav>
       <div id="res-content"></div>
       <aside id="assert-panel"></aside>    <!-- assertionsPanel.ts -->
-      <!-- Socket 响应区（kind=websocket/tcp 时可见；#res-* 隐藏） -->
+      <!-- Socket 响应区（kind=websocket/socketio/tcp 时可见；#res-* 隐藏） -->
       <nav id="socket-res-tabs"></nav>
       <div id="socket-res-content"></div>
     </section>
@@ -420,9 +520,12 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
 ### state.ts
 
 - `RequestState`：method/url/params/headers/pathParams/bodyType/formData/urlEncoded/raw/rawType/
-  binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP 追加**：
-  `kind: "http" | "websocket" | "tcp"`（默认 "http"）、`messages: SavedMessage[]`
-  （已存消息模板）、`socketProtocol: string`（WS 子协议，设置页编辑）。
+  binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP/Socket.IO 追加**：
+  `kind: "http" | "websocket" | "tcp" | "socketio"`（默认 "http"）、`messages: SavedMessage[]`
+  （已存消息模板，Socket.IO 模板带 `event`）、`socketProtocol: string`（WS 子协议，设置页编辑）、
+  `socketEvents: SavedSocketEvent[]`（Socket.IO 事件定义）、`socketIOVersion: string`
+  （"4" 默认 / "3"，映射 `SocketConnectParams.version`）、`socketIOPath: string`
+  （Engine.IO 握手路径，映射 `SocketConnectParams.path`）。后三项随 .band 持久化并原样回读。
 - 变量 store（应用级，随工作区文件保存）：`getVars/setVars/updateVars/subscribeVars`，
   **纯内存、不写 localStorage**（关闭即清空，避免凭据外泄）；`loadWorkspace` 用
   `file.data.vars` 整体替换（走不置脏的 replaceVars 安静路径），保存时
@@ -437,23 +540,29 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
 - 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
   Socket 会话（日志/连接状态）也不持久化。
-- `newRequest(kind)` 按类型重置编辑器；`snapshotCurrent()` 快照带 kind/messages，
-  命名规则：HTTP `METHOD host/path`；WS `WS host/path`；TCP `TCP host:port`（截断 40 字符）。
+- `newRequest(kind)` 按类型重置编辑器；`snapshotCurrent()` 快照带 kind/messages/socketEvents，
+  命名规则：HTTP `METHOD host/path`；WS `WS host/path`；Socket.IO `SIO host/path`；
+  TCP `TCP host:port`（截断 40 字符）。
 
 ### socket.ts
 
 - `SocketSession`：`{ connId, kind, status: "idle"|"connecting"|"open"|"closed",
   log: SocketLogEntry[], handshakeHeaders: KeyValue[] | null, stoppedByUser: boolean }`，
   单例（应用单编辑器，同时只保一条连接）；`SocketLogEntry` =
-  `{ id, at, direction: "send"|"receive", payload, isBinary }`，**上限 500 条**。
-- `connectSocket()`：校验 URL（WS 须 `ws://`/`wss://` 开头；TCP 须 `host:port`），
-  不合法直接 `updateResponse({error})` 提示并返回；`connId = crypto.randomUUID()`；
-  构造 `Channel<SocketEvent>` 调 `SocketService.connect(params, channel)`：
+  `{ id, at, direction: "send"|"receive"|"system", payload, isBinary, event?, isAck?, tone? }`，
+  **上限 500 条**。
+- `connectSocket()`：校验 URL（WS 须 `ws://`/`wss://` 开头；Socket.IO 须 `http://`/`https://`
+  开头且 host 非空；TCP 须 `host:port`），不合法直接 `updateResponse({error})` 提示并返回；
+  `connId = crypto.randomUUID()`；构造 `Channel<SocketEvent>` 调
+  `SocketService.connect(params, channel)`（Socket.IO 额外带 `path`/`version`）：
   - `open` → status=open、记录握手头、**立即入册内存工作区**（同 SSE 语义）；
-  - `message` → 追加日志；`error`/`close` → 日志记系统行（红/灰）并置 status=closed；
+    Socket.IO 且没有任何启用的监听事件时追加一条灰色提示；
+  - `message` → 追加日志（带事件名）；**Socket.IO 的入站事件在这里过滤**：`isAck` 恒显示，
+    其余按 `socketEvents` 的 `enabled` 判定，未勾选的直接丢弃（不重连、即时生效）；
+  - `error`/`close` → 日志记系统行（红/灰）并置 status=closed；
   - channel onclose → 清理 in-flight 状态；Connect 返回的拒绝若 `stoppedByUser` 则吞掉。
-- `sendSocketMessage({payload, isBinary})` → `SocketService.send`（发送日志由后端
-  open 连接推回的 `direction:"send"` 事件产生）；失败 updateResponse error。
+- `sendSocketMessage({payload, isBinary, event, ack})` → `SocketService.send`（发送日志由后端
+  open 连接推回的 `direction:"send"` 事件产生，带事件名）；失败 updateResponse error。
 - `disconnectSocket()`：置 stoppedByUser → `SocketService.disconnect(connId)`。
 - **切换编辑器 kind 或载入其他工作区条目时，若连接开着先断开**（自动，不询问）。
 
@@ -473,24 +582,30 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 
 ### 行为细节
 
-- 编辑器按 `kind` 三态渲染：
+- 编辑器按 `kind` 四态渲染：
   - **urlBar**（kind 感知，订阅 kind 变化重渲染）：HTTP 不变（方法下拉 + 发送 + h2c）；
-    WS/TCP 隐藏方法下拉与 h2c，占位符 WS「请输入以 ws:// 或 wss:// 开头的地址」、
-    TCP「请输入主机:端口，如 127.0.0.1:7000」；右侧按钮随会话状态在 连接/断开 间切换
-    （connecting/open 显示 断开）。
+    WS/TCP/Socket.IO 隐藏方法下拉与 h2c，占位符 WS「请输入以 ws:// 或 wss:// 开头的地址」、
+    TCP「请输入主机:端口，如 127.0.0.1:7000」、Socket.IO「http://localhost:6021」；
+    右侧按钮随会话状态在 连接/断开 间切换（connecting/open 显示 断开）。
   - **请求页签集**：HTTP = 现有 8 页（预执行脚本 / 后执行脚本页挂 Monaco 编辑器，
     见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib）；
     WS = 发送消息 / 请求头 / 请求参数 / 设置（设置 = 子协议输入框，映射 `socketProtocol`）；
-    TCP = 发送消息。同样用 tabs.ts。
+    **Socket.IO = 发送消息 / 事件 / 请求头 / 请求参数 / 设置**（设置 = 客户端版本 +
+    握手路径，映射 `socketIOVersion` / `socketIOPath`）；TCP = 发送消息。同样用 tabs.ts。
   - **发送消息页**（socketComposer.ts）：左侧消息模板列表（点击载入编辑器、双击名称
     行内重命名、行尾 × 删除、「+ 新增」把当前编辑器内容存为模板并选中）；右侧编辑器 =
     名称 + 类型下拉（Text/JSON/XML/HTML/Binary，映射 `SavedMessage.msgType`）+
     内容 textarea（Binary 时 placeholder 提示粘贴 base64）+ [发送]（未连接禁用）+
-    [存为消息]。
+    [存为消息]；Socket.IO 在名称行下方多一行 事件名输入 + Ack 勾选（映射
+    `sendSocketMessage({event, ack})`，事件名同时随模板存进 `SavedMessage.event`），
+    且类型下拉不提供 Binary。
+  - **事件页**（socketEventsEditor.ts，仅 Socket.IO）：四列表格 = 监听勾选 / 事件名 /
+    描述 / ×（复用 kvTable 的 `kv-table` 栅格与输入样式，列宽由 `.sock-events-table` 覆盖）
+    +「+ 添加事件」；直接读写 `getRequest().socketEvents`。勾选只影响日志过滤，不影响握手。
   - **Socket 响应区**（socketPanel.ts）：页签 = 实时响应 / 响应头(n)（TCP 隐藏响应头页）。
-    实时响应 = 日志列表（时间 + 发送/接收徽章 + 转义 `<pre>` 内容，二进制标注 base64，
-    error/close 系统行红/灰着色），自动滚底，工具栏 清空 / 复制全部；响应头页 =
-    WS 握手响应头表格（来自 open 事件，n 为数量）。
+    实时响应 = 日志列表（时间 + 发送/接收徽章 + 事件名 chip + ack/二进制标记 + 转义
+    `<pre>` 内容，error/close 系统行红/灰着色），自动滚底，工具栏 清空 / 复制全部；
+    响应头页 = 握手响应头表格（来自 open 事件，n 为数量）。
 - Path 页：从 URL 提取 `{placeholder}` 生成可编辑行；发送前把 `{k}` 替换为
   `encodeURIComponent(v)`（前端完成，不进 IPC）。
 - 发送流程：构造 `new Channel<SSEMessage>(handler)` 传给 `RequestService.send(req, channel)`；
@@ -531,12 +646,12 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   syncPathParams + scheduleSave + notify（loadSavedRequest / loadEntry 共用）；kind 切换
   由 main.ts 联动（响应区两组 hidden、页签集、urlBar）并调 socket.ts 的「切换先断开」。
 - 自动入册：一次发送（含报错、手动停止）结束后，当前编辑器快照自动 upsert 进
-  内存工作区；SSE 在拿到响应头（open）时即入册，结束再刷新一次；**WS/TCP 在 connect
-  的 open 事件时入册，到达 closed（断开、被拒、失败）再刷新一次**——失败也收，与
+  内存工作区；SSE 在拿到响应头（open）时即入册，结束再刷新一次；**WS/TCP/Socket.IO 在
+  connect 的 open 事件时入册，到达 closed（断开、被拒、失败）再刷新一次**——失败也收，与
   HTTP「无论成败都收」一致；切换 kind / 载入其它条目先断开，那时编辑器 URL 与连接
   对不上，不会误收。新建请求执行一次后即以自动名出现在列表；**派生新条目规则泛化为：
-  HTTP 比较 method+URL、WS/TCP 比较 URL——与已入册条目不一致即视为新请求，执行后
-  派生新条目，原条目原样保留**；未变的编辑按 id 原地刷新，**改过名的条目保留别名**。
+  HTTP 比较 method+URL、WS/TCP/Socket.IO 比较 URL——与已入册条目不一致即视为新请求，
+  执行后派生新条目，原条目原样保留**；未变的编辑按 id 原地刷新，**改过名的条目保留别名**。
 - 保存流程（main.ts）：内存即真相——「保存」把 `WorkspaceState` 整块
   `{name, entries}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
   无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示；
@@ -630,4 +745,7 @@ bun run typecheck                # = frontend tsc --noEmit
 bun run dev                      # 开发（热重载）
 bun run sse:demo                 # 本地 SSE 测试服务器（http://localhost:8123/sse）
 bun run socket:demo              # 本地 WS/TCP 回显（ws://localhost:8124，tcp 127.0.0.1:8125）
+bun run socketio:demo            # 本地 Socket.IO 演示服务器（http://localhost:6021/，命名空间 /admin）
+go test -race ./backend/...      # 连接有并发，改连接/流代码后跑一遍
+bunx mygo vet backend            # 或 backend 下 node_modules/.bin/mygo vet .（= Go vet，无 go tool mygo）
 ```

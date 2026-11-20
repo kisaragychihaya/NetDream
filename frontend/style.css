@@ -831,6 +831,10 @@ button:disabled {
   height: 28px;
 }
 
+.field select {
+  height: 28px;
+}
+
 /* ---- 响应区 ---- */
 
 #response-pane {
@@ -1557,6 +1561,10 @@ button:disabled {
   color: #9333ea;
 }
 
+.m-sio {
+  color: #d97706;
+}
+
 @media (prefers-color-scheme: dark) {
   :root[data-theme="auto"] .m-ws {
     color: #4ade80;
@@ -1564,6 +1572,10 @@ button:disabled {
 
   :root[data-theme="auto"] .m-tcp {
     color: #c084fc;
+  }
+
+  :root[data-theme="auto"] .m-sio {
+    color: #fbbf24;
   }
 }
 
@@ -1573,6 +1585,10 @@ button:disabled {
 
 :root[data-theme="dark"] .m-tcp {
   color: #c084fc;
+}
+
+:root[data-theme="dark"] .m-sio {
+  color: #fbbf24;
 }
 
 /* ---- Socket 响应区 ---- */
@@ -1592,6 +1608,7 @@ button:disabled {
 }
 
 #response-pane[data-kind="websocket"],
+#response-pane[data-kind="socketio"],
 #response-pane[data-kind="tcp"] {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -1700,6 +1717,27 @@ button:disabled {
   color: var(--orange);
   font-size: 10px;
   letter-spacing: 0.02em;
+}
+
+/* Socket.IO 日志行的事件名与 ack 标记：让事件名在长 payload 前先被认出来 */
+.sock-event {
+  flex: none;
+  max-width: 180px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sock-event.ack {
+  background: var(--orange-soft);
+  color: var(--orange);
+  font-weight: 500;
 }
 
 .sock-payload {
@@ -1864,6 +1902,33 @@ button:disabled {
   width: 96px;
 }
 
+/* Socket.IO 专属的一行：事件名 + Ack，其余 kind 下隐藏 */
+.sock-io {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sock-io[hidden] {
+  display: none;
+}
+
+.sock-event-name {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+}
+
+.sock-ack {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .sock-message {
   flex: 1;
   min-height: 150px;
@@ -1919,7 +1984,22 @@ button:disabled {
 }
 
 .sock-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   max-width: 460px;
+}
+
+/* Socket.IO 的「事件」页：复用键值表格的栅格，列换成 监听 / 事件名 / 描述 / 删除 */
+.sock-events {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sock-events-table .kv-head,
+.sock-events-table .kv-row {
+  grid-template-columns: 34px minmax(0, 1fr) minmax(0, 1.4fr) 28px;
 }
 
 .copy-helper {

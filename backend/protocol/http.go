@@ -1,8 +1,9 @@
-package main
+package protocol
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -30,8 +32,126 @@ const (
 	defaultTimeout   = 30 * time.Second
 )
 
+// Do performs req and returns the response, along with what was actually sent.
+// An event stream arrives on emit instead of in the body; a nil emit reads the
+// stream to its end and only reports the meta, which is what a test wants.
+func Do(ctx context.Context, req HTTPRequest, emit Emit) (HTTPResponse, error) {
+	target, err := targetURL(req)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+
+	body, contentType, sentBody, err := buildBody(req)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, methodOf(req.Method), target.String(), body)
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("invalid request: %w", err)
+	}
+
+	explicit := map[string]bool{}
+	for _, h := range req.Headers {
+		if h.Key == "" {
+			continue
+		}
+		httpReq.Header.Add(h.Key, h.Value)
+		explicit[http.CanonicalHeaderKey(h.Key)] = true
+	}
+
+	if contentType != "" && !explicit["Content-Type"] {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
+	if !explicit["Authorization"] {
+		switch strings.ToLower(strings.TrimSpace(req.Auth.Type)) {
+		case "basic":
+			httpReq.SetBasicAuth(req.Auth.Username, req.Auth.Password)
+		case "bearer":
+			httpReq.Header.Set("Authorization", "Bearer "+req.Auth.Token)
+		}
+	}
+	if !explicit["Cookie"] {
+		if cookie := cookieHeader(req.Cookies); cookie != "" {
+			httpReq.Header.Set("Cookie", cookie)
+		}
+	}
+
+	sentHeaders := flattenHeaders(httpReq.Header)
+	finalURL := httpReq.URL.String()
+
+	// The deadline covers a plain response, headers and body alike. An event
+	// stream drops it as soon as its headers show what it is, and then runs
+	// until the page stops it or the window closes.
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	var timedOut atomic.Bool
+	expire := time.AfterFunc(timeout, func() {
+		timedOut.Store(true)
+		cancel()
+	})
+	defer expire.Stop()
+
+	client := &http.Client{Transport: proxiedTransport()}
+	if req.HTTP2 && target.Scheme == "http" {
+		client.Transport = h2cTransport()
+	}
+
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("request failed: %w", deadlineCause(err, timedOut.Load()))
+	}
+	defer resp.Body.Close()
+
+	meta := HTTPResponse{
+		Status:      resp.StatusCode,
+		StatusText:  resp.Status,
+		Proto:       resp.Proto,
+		Headers:     flattenHeaders(resp.Header),
+		Cookies:     responseCookies(resp.Cookies()),
+		FinalURL:    finalURL,
+		SentHeaders: sentHeaders,
+		SentBody:    sentBody,
+	}
+
+	if isEventStream(resp.Header) {
+		expire.Stop()
+		return streamEvents(resp.Body, meta, emit, start)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("reading the response failed: %w", deadlineCause(err, timedOut.Load()))
+	}
+	truncated := len(data) > maxResponseBytes
+	if truncated {
+		data = data[:maxResponseBytes]
+	}
+
+	meta.Body = string(data)
+	meta.TimeMS = time.Since(start).Milliseconds()
+	meta.SizeBytes = len(data)
+	meta.Truncated = truncated
+	return meta, nil
+}
+
+// deadlineCause reports err as the deadline it came from once the request's
+// own timeout fired, so a plain response reads as the timeout it always was.
+func deadlineCause(err error, timedOut bool) error {
+	if timedOut {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
 // targetURL parses req.URL and puts its query parameters on it.
-func targetURL(req APIRequest) (*url.URL, error) {
+func targetURL(req HTTPRequest) (*url.URL, error) {
 	raw := strings.TrimSpace(req.URL)
 	if raw == "" {
 		return nil, fmt.Errorf("URL is empty")
@@ -85,7 +205,7 @@ func h2cTransport() *http2.Transport {
 
 // buildBody turns the request's body type into a body, the Content-Type it
 // implies, and the text preview the page shows. A nil body is no body.
-func buildBody(req APIRequest) (io.Reader, string, string, error) {
+func buildBody(req HTTPRequest) (io.Reader, string, string, error) {
 	switch req.BodyType {
 	case "formData":
 		buf := new(bytes.Buffer)

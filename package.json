@@ -10,7 +10,8 @@
     "generate": "mygo generate",
     "typecheck": "bun run --cwd frontend typecheck",
     "sse:demo": "bun scripts/sse-demo.ts",
-    "socket:demo": "bun scripts/socket-demo.ts"
+    "socket:demo": "bun scripts/socket-demo.ts",
+    "socketio:demo": "bun scripts/socketio-demo.ts"
   },
   "devDependencies": {
     "mygo-cli": "^0.10.0"

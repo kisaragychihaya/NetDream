@@ -1,4 +1,4 @@
-package main
+package protocol
 
 import (
 	"bufio"
@@ -15,10 +15,11 @@ import (
 
 // 系统代理跟随：HTTP_PROXY 等环境变量优先（Go 默认行为），未命中再读
 // 操作系统设置里的代理（Windows 注册表 / macOS scutil），都没有才直连。
-// WebSocket 握手同样经 proxyForRequest；TCP 裸连接没有代理概念，保持直连。
+// WebSocket / Socket.IO 握手同样经 proxyForRequest；TCP 裸连接没有代理概念，
+// 保持直连。
 
 // proxyConfig 是一份解析好的系统代理设置：按协议给出代理地址
-//（host:port），Bypass 是不走代理的主机列表（支持 * 通配、<local> 与 CIDR）。
+// （host:port），Bypass 是不走代理的主机列表（支持 * 通配、<local> 与 CIDR）。
 type proxyConfig struct {
 	HTTP   string
 	HTTPS  string

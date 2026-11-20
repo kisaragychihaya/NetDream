@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/egoist/mygo"
+
+	"netdream/backend/protocol"
 )
 
 // RequestService sends HTTP requests for the debug page and picks files for it.
@@ -75,113 +72,11 @@ func (RequestService) Send(ctx context.Context, req APIRequest, stream *mygo.Cha
 		return res, nil
 	}
 
-	target, err := targetURL(req)
+	res, err := protocol.Do(ctx, protocolRequest(req), sseEmitter(stream))
 	if err != nil {
 		return failure(err)
 	}
-
-	body, contentType, sentBody, err := buildBody(req)
-	if err != nil {
-		return failure(err)
-	}
-
-	reqCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(reqCtx, methodOf(req.Method), target.String(), body)
-	if err != nil {
-		return failure(fmt.Errorf("invalid request: %w", err))
-	}
-
-	explicit := map[string]bool{}
-	for _, h := range req.Headers {
-		if h.Key == "" {
-			continue
-		}
-		httpReq.Header.Add(h.Key, h.Value)
-		explicit[http.CanonicalHeaderKey(h.Key)] = true
-	}
-
-	if contentType != "" && !explicit["Content-Type"] {
-		httpReq.Header.Set("Content-Type", contentType)
-	}
-	if !explicit["Authorization"] {
-		switch strings.ToLower(strings.TrimSpace(req.Auth.Type)) {
-		case "basic":
-			httpReq.SetBasicAuth(req.Auth.Username, req.Auth.Password)
-		case "bearer":
-			httpReq.Header.Set("Authorization", "Bearer "+req.Auth.Token)
-		}
-	}
-	if !explicit["Cookie"] {
-		if cookie := cookieHeader(req.Cookies); cookie != "" {
-			httpReq.Header.Set("Cookie", cookie)
-		}
-	}
-
-	sentHeaders := flattenHeaders(httpReq.Header)
-	finalURL := httpReq.URL.String()
-
-	// The deadline covers a plain response, headers and body alike. An event
-	// stream drops it as soon as its headers show what it is, and then runs
-	// until the page stops it or the window closes.
-	timeout := time.Duration(req.Timeout) * time.Second
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	var timedOut atomic.Bool
-	expire := time.AfterFunc(timeout, func() {
-		timedOut.Store(true)
-		cancel()
-	})
-	defer expire.Stop()
-
-	client := &http.Client{Transport: proxiedTransport()}
-	if req.HTTP2 && target.Scheme == "http" {
-		client.Transport = h2cTransport()
-	}
-
-	start := time.Now()
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return failure(fmt.Errorf("request failed: %w", deadlineCause(err, timedOut.Load())))
-	}
-	defer resp.Body.Close()
-
-	meta := APIResponse{
-		Status:      resp.StatusCode,
-		StatusText:  resp.Status,
-		Proto:       resp.Proto,
-		Headers:     flattenHeaders(resp.Header),
-		Cookies:     responseCookies(resp.Cookies()),
-		FinalURL:    finalURL,
-		SentHeaders: sentHeaders,
-		SentBody:    sentBody,
-	}
-
-	if isEventStream(resp.Header) {
-		expire.Stop()
-		streamed, err := streamEvents(resp.Body, meta, stream, start)
-		if err != nil {
-			return failure(err)
-		}
-		return finish(streamed)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return failure(fmt.Errorf("reading the response failed: %w", deadlineCause(err, timedOut.Load())))
-	}
-	truncated := len(data) > maxResponseBytes
-	if truncated {
-		data = data[:maxResponseBytes]
-	}
-
-	meta.Body = string(data)
-	meta.TimeMS = time.Since(start).Milliseconds()
-	meta.SizeBytes = len(data)
-	meta.Truncated = truncated
-	return finish(meta)
+	return finish(apiResponse(res))
 }
 
 // PickFile asks the user for a file and returns its path, or "" when they
@@ -197,11 +92,124 @@ func (RequestService) PickFile() (string, error) {
 	return paths[0], nil
 }
 
-// deadlineCause reports err as the deadline it came from once the request's
-// own timeout fired, so a plain response reads as the timeout it always was.
-func deadlineCause(err error, timedOut bool) error {
-	if timedOut {
-		return context.DeadlineExceeded
+// protocolRequest is the request as the protocol package takes it: the page's
+// contract types stop at this package's edge.
+func protocolRequest(req APIRequest) protocol.HTTPRequest {
+	return protocol.HTTPRequest{
+		Method:     req.Method,
+		URL:        req.URL,
+		Params:     protocolPairs(req.Params),
+		Headers:    protocolPairs(req.Headers),
+		BodyType:   req.BodyType,
+		FormData:   protocolFields(req.FormData),
+		URLEncoded: protocolPairs(req.URLEncoded),
+		Raw:        req.Raw,
+		RawType:    req.RawType,
+		BinaryPath: req.BinaryPath,
+		Auth: protocol.AuthInfo{
+			Type:     req.Auth.Type,
+			Username: req.Auth.Username,
+			Password: req.Auth.Password,
+			Token:    req.Auth.Token,
+		},
+		Cookies: protocolPairs(req.Cookies),
+		Timeout: req.Timeout,
+		HTTP2:   req.HTTP2,
 	}
-	return err
+}
+
+// apiResponse is what the protocol package answered, as the page reads it.
+func apiResponse(res protocol.HTTPResponse) APIResponse {
+	cookies := make([]ResponseCookie, 0, len(res.Cookies))
+	for _, c := range res.Cookies {
+		cookies = append(cookies, ResponseCookie{
+			Name:     c.Name,
+			Value:    c.Value,
+			Path:     c.Path,
+			Domain:   c.Domain,
+			Expires:  c.Expires,
+			Secure:   c.Secure,
+			HttpOnly: c.HttpOnly,
+		})
+	}
+	return APIResponse{
+		Status:      res.Status,
+		StatusText:  res.StatusText,
+		Proto:       res.Proto,
+		Headers:     pairsFromProtocol(res.Headers),
+		Cookies:     cookies,
+		Body:        res.Body,
+		TimeMS:      res.TimeMS,
+		SizeBytes:   res.SizeBytes,
+		Truncated:   res.Truncated,
+		FinalURL:    res.FinalURL,
+		SentHeaders: pairsFromProtocol(res.SentHeaders),
+		SentBody:    res.SentBody,
+	}
+}
+
+// sseEmitter adapts the page's channel to the callback the protocol package
+// streams an event stream through.
+func sseEmitter(stream *mygo.Channel[SSEMessage]) protocol.Emit {
+	if stream == nil {
+		return nil
+	}
+	return func(msg protocol.SSEMessage) error {
+		return stream.Send(SSEMessage{Open: sseOpen(msg.Open), Event: sseEvent(msg.Event)})
+	}
+}
+
+// sseOpen is a stream head as the page reads it.
+func sseOpen(open *protocol.SSEOpen) *SSEOpen {
+	if open == nil {
+		return nil
+	}
+	return &SSEOpen{
+		Status:     open.Status,
+		StatusText: open.StatusText,
+		Proto:      open.Proto,
+		Headers:    pairsFromProtocol(open.Headers),
+	}
+}
+
+// sseEvent is one dispatched event as the page reads it.
+func sseEvent(event *protocol.SSEEvent) *SSEEvent {
+	if event == nil {
+		return nil
+	}
+	return &SSEEvent{N: event.N, ID: event.ID, Event: event.Event, Data: event.Data}
+}
+
+// protocolPairs hands a list of key/value pairs to the protocol package.
+func protocolPairs(list []KeyValue) []protocol.KeyValue {
+	out := make([]protocol.KeyValue, 0, len(list))
+	for _, kv := range list {
+		out = append(out, protocol.KeyValue{Key: kv.Key, Value: kv.Value})
+	}
+	return out
+}
+
+// pairsFromProtocol is the reverse of protocolPairs.
+func pairsFromProtocol(list []protocol.KeyValue) []KeyValue {
+	out := make([]KeyValue, 0, len(list))
+	for _, kv := range list {
+		out = append(out, KeyValue{Key: kv.Key, Value: kv.Value})
+	}
+	return out
+}
+
+// protocolFields hands the multipart fields to the protocol package.
+func protocolFields(list []FormField) []protocol.FormField {
+	out := make([]protocol.FormField, 0, len(list))
+	for _, f := range list {
+		out = append(out, protocol.FormField{
+			Key:         f.Key,
+			Value:       f.Value,
+			ContentType: f.ContentType,
+			Description: f.Description,
+			Kind:        f.Kind,
+			FilePath:    f.FilePath,
+		})
+	}
+	return out
 }

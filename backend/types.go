@@ -127,14 +127,19 @@ type SSEMessage struct {
 	Event *SSEEvent `json:"event,omitempty"`
 }
 
-// SocketConnectParams 发起一条 WebSocket（ws:// / wss://）或 TCP 连接。
+// SocketConnectParams 发起一条 WebSocket（ws:// / wss://）、TCP 或 Socket.IO 连接。
 type SocketConnectParams struct {
 	ID       string     `json:"id"`       // 前端生成的连接 id（uuid）；Send/Disconnect 凭它定位连接
-	Kind     string     `json:"kind"`     // "websocket" | "tcp"
-	URL      string     `json:"url"`      // websocket：ws:// 或 wss:// 地址；tcp：host:port
-	Params   []KeyValue `json:"params"`   // 查询参数（仅 WS 使用）：拼到 URL（已有查询串则追加）
-	Headers  []KeyValue `json:"headers"`  // WS 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头
-	Protocol string     `json:"protocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个
+	Kind     string     `json:"kind"`     // "websocket" | "tcp" | "socketio"
+	URL      string     `json:"url"`      // websocket：ws:// 或 wss:// 地址；socketio：http(s)://host[:port][/命名空间]；tcp：host:port
+	Params   []KeyValue `json:"params"`   // 查询参数（WS/Socket.IO 使用）：拼到 URL 或握手地址（已有查询串则追加；socketio 不覆盖 EIO/transport）
+	Headers  []KeyValue `json:"headers"`  // WS/Socket.IO 握手请求头（TCP 忽略）；后端须过滤 gorilla 托管头
+	Protocol string     `json:"protocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔多个；socketio 忽略
+	// Path 是 Socket.IO 的 Engine.IO 握手路径，空 = "/socket.io/"（缺首尾斜杠由后端补齐）；仅 socketio 使用。
+	Path string `json:"path"`
+	// Version 是 Socket.IO 协议版本："4"（默认 = EIO4 / Socket.IO v3+）|
+	// "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
+	Version string `json:"version"`
 }
 
 // SocketSendParams 在已建立的连接上发送一条消息。
@@ -142,6 +147,10 @@ type SocketSendParams struct {
 	ID       string `json:"id"`
 	Payload  string `json:"payload"` // 文本 = 原文；二进制 = base64
 	IsBinary bool   `json:"isBinary"`
+	// Event 是 Socket.IO 事件名（空 = "message"）；ws/tcp 忽略。
+	Event string `json:"event"`
+	// Ack 要求 Socket.IO 服务器对这条事件回 ack（连接内自增 id）；ws/tcp 忽略。
+	Ack bool `json:"ack"`
 }
 
 // SocketEvent 是连接生命周期事件，Connect 存续期间经 stream 推送。
@@ -155,6 +164,10 @@ type SocketEvent struct {
 	Reason    string     `json:"reason,omitempty"`   // 错误/关闭原因
 	Headers   []KeyValue `json:"headers,omitempty"`  // open：WS 握手响应头（按 key 排序、同名合并）
 	Protocol  string     `json:"protocol,omitempty"` // open：实际协商出的子协议
+	// Event 是 Socket.IO 的事件名（收发 message 与 ack 回答都带）；ws/tcp 为空。
+	Event string `json:"event,omitempty"`
+	// IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。
+	IsAck bool `json:"isAck,omitempty"`
 }
 
 type SavedAssertion struct { // 前端 AssertionRule 的持久化形态
@@ -164,36 +177,48 @@ type SavedAssertion struct { // 前端 AssertionRule 的持久化形态
 	Value   string `json:"value"`
 }
 
-type SavedMessage struct { // WS/TCP 的已存消息模板（发送消息页左侧列表）
+type SavedMessage struct { // WS/TCP/Socket.IO 的已存消息模板（发送消息页左侧列表）
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	MsgType string `json:"msgType"` // "text" | "json" | "xml" | "html" | "binary"
 	Payload string `json:"payload"`
+	// Event 是 Socket.IO 模板的事件名，空 = "message"；ws/tcp 为空。
+	Event string `json:"event"`
+}
+
+type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的事件列表）
+	ID          string `json:"id"`
+	Name        string `json:"name"`        // 事件名：发送时作为 EVENT 包的事件名
+	Enabled     bool   `json:"enabled"`     // 停用的事件不出现在发送消息页
+	Description string `json:"description"` // 备注，不发送
 }
 
 type SavedRequest struct { // RequestState 的快照 + 展示名
-	ID             string           `json:"id"`
-	Name           string           `json:"name"`
-	Kind           string           `json:"kind"` // "http" | "websocket" | "tcp"；空 = http（兼容旧 .band）
-	Method         string           `json:"method"`
-	URL            string           `json:"url"`
-	Params         []KeyValue       `json:"params"`
-	Headers        []KeyValue       `json:"headers"`
-	BodyType       string           `json:"bodyType"`
-	FormData       []FormField      `json:"formData"`
-	URLEncoded     []KeyValue       `json:"urlEncoded"`
-	Raw            string           `json:"raw"`
-	RawType        string           `json:"rawType"`
-	BinaryPath     string           `json:"binaryPath"`
-	Auth           AuthInfo         `json:"auth"`
-	Cookies        []KeyValue       `json:"cookies"`
-	Timeout        int              `json:"timeout"`
-	HTTP2          bool             `json:"http2"`
-	PreScript      string           `json:"preScript"`  // 预执行脚本；空 = 无
-	PostScript     string           `json:"postScript"` // 后执行脚本；空 = 无
-	Assertions     []SavedAssertion `json:"assertions"`
-	Messages       []SavedMessage   `json:"messages"`       // 仅 WS/TCP 使用；nil 落盘补 []（生成 TS 类型要求）
-	SocketProtocol string           `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
+	ID              string             `json:"id"`
+	Name            string             `json:"name"`
+	Kind            string             `json:"kind"` // "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band）
+	Method          string             `json:"method"`
+	URL             string             `json:"url"`
+	Params          []KeyValue         `json:"params"`
+	Headers         []KeyValue         `json:"headers"`
+	BodyType        string             `json:"bodyType"`
+	FormData        []FormField        `json:"formData"`
+	URLEncoded      []KeyValue         `json:"urlEncoded"`
+	Raw             string             `json:"raw"`
+	RawType         string             `json:"rawType"`
+	BinaryPath      string             `json:"binaryPath"`
+	Auth            AuthInfo           `json:"auth"`
+	Cookies         []KeyValue         `json:"cookies"`
+	Timeout         int                `json:"timeout"`
+	HTTP2           bool               `json:"http2"`
+	PreScript       string             `json:"preScript"`  // 预执行脚本；空 = 无
+	PostScript      string             `json:"postScript"` // 后执行脚本；空 = 无
+	Assertions      []SavedAssertion   `json:"assertions"`
+	Messages        []SavedMessage     `json:"messages"`        // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
+	SocketProtocol  string             `json:"socketProtocol"`  // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
+	SocketEvents    []SavedSocketEvent `json:"socketEvents"`    // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
+	SocketIOVersion string             `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
+	SocketIOPath    string             `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
 }
 
 type WorkspaceData struct {

@@ -60,6 +60,8 @@ function rowFor(entry: SocketLogEntry): HTMLElement {
   const row = el("div", classes.join(" "));
   row.append(el("span", "sock-time", timeText(entry.at)));
   row.append(el("span", "sock-dir", t(DIRECTION_TEXT[entry.direction])));
+  if (entry.event !== undefined) row.append(el("span", "sock-event", entry.event));
+  if (entry.isAck === true) row.append(el("span", "sock-event ack", "ack"));
   if (entry.isBinary) row.append(el("span", "sock-b64", "base64"));
   const payload = document.createElement("pre");
   payload.className = "sock-payload";
@@ -101,6 +103,13 @@ function tabsFor(kind: RequestKind, session: SocketSession): TabDef[] {
     defs.push({ id: "headers", label: t("response.headers"), count: session.handshakeHeaders?.length ?? 0 });
   }
   return defs;
+}
+
+/** 日志计数旁的提示：说清这一栏属于哪种连接。 */
+function connectionLabel(kind: RequestKind): string {
+  if (kind === "tcp") return t("socket.tcpConnection");
+  if (kind === "socketio") return t("socket.sioConnection");
+  return t("socket.wsConnection");
 }
 
 export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement): () => void {
@@ -159,8 +168,12 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
       const session = getSocketSession();
       const text = session.log
         .map((entry) => {
-          const tag = t(DIRECTION_TEXT[entry.direction]) + (entry.isBinary ? " base64" : "");
-          return `${timeText(entry.at)} [${tag}] ${logText(entry)}`;
+          // 复制出来的文本要能脱离界面读：事件名与 ack 标记都带上。
+          const tags = [t(DIRECTION_TEXT[entry.direction])];
+          if (entry.event !== undefined) tags.push(entry.event);
+          if (entry.isAck === true) tags.push("ack");
+          if (entry.isBinary) tags.push("base64");
+          return `${timeText(entry.at)} [${tags.join(" ")}] ${logText(entry)}`;
         })
         .join("\n");
       void copyText(text).then((ok) => {
@@ -219,7 +232,7 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
     view.protocol.textContent = protocol;
     view.protocol.hidden = protocol === "";
     view.count.textContent = t("socket.logCount", { count: session.log.length });
-    view.count.title = kind === "tcp" ? t("socket.tcpConnection") : t("socket.wsConnection");
+    view.count.title = connectionLabel(kind);
 
     const error = getResponse().error;
     view.banner.textContent = error ?? "";

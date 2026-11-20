@@ -44,8 +44,16 @@ const UNTITLED_REQUEST = "sidebar.untitledRequest";
 const NEW_OPTIONS: { kind: RequestKind; labelKey: string }[] = [
   { kind: "http", labelKey: "sidebar.newHttp" },
   { kind: "websocket", labelKey: "sidebar.newWebSocket" },
+  { kind: "socketio", labelKey: "sidebar.newSocketIO" },
   { kind: "tcp", labelKey: "sidebar.newTcp" },
 ];
+
+/** 连接类请求在列表里的类型徽标；HTTP 用方法名，见 entryRow。 */
+const SOCKET_BADGES: Record<string, { className: string; text: string }> = {
+  websocket: { className: "m-badge m-ws", text: "WS" },
+  socketio: { className: "m-badge m-sio", text: "IO" },
+  tcp: { className: "m-badge m-tcp", text: "TCP" },
+};
 
 function methodClass(method: string): string {
   const known = METHODS.find((name) => name === method);
@@ -254,13 +262,11 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     });
 
     const badge = document.createElement("span");
-    const kind = entry.kind === "websocket" || entry.kind === "tcp" ? entry.kind : "http";
-    if (kind === "websocket") {
-      badge.className = "m-badge m-ws";
-      badge.textContent = "WS";
-    } else if (kind === "tcp") {
-      badge.className = "m-badge m-tcp";
-      badge.textContent = "TCP";
+    // 旧 .band 里 HTTP 条目的 kind 是空串：查不到就走下面的方法名分支。
+    const socketBadge = SOCKET_BADGES[entry.kind];
+    if (socketBadge !== undefined) {
+      badge.className = socketBadge.className;
+      badge.textContent = socketBadge.text;
     } else {
       badge.className = `m-badge ${methodClass(entry.method)}`.trim();
       badge.textContent = entry.method || "GET";

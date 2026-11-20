@@ -12,6 +12,7 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **HTTP/2**: ALPN negotiation on `https://`, forced h2c on `http://`, response protocol visible
 - **SSE streaming**: live event table, stop anytime
 - **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
+- **Socket.IO debugging**: Socket.IO v3 / v4 / v5 (EIO4) and v2 (EIO3), URL path as namespace, configurable handshake path, event name + ack on send, per-event listen filtering (no reconnect needed)
 - **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy
 - **Assertions panel**: status code, contains / not-contains, response time
 - **Pre / post scripts**: executed by a goja engine — pre scripts can rewrite the request, post scripts can assert on the response, both can read/write variables; console output lands in the "Console" tab, assertions in the assertions panel
@@ -53,6 +54,7 @@ bun run generate      # regenerate the frontend IPC bindings (frontend/src/mygo.
 bun run typecheck     # frontend type check
 bun run sse:demo      # local SSE test server (http://localhost:8123/sse)
 bun run socket:demo   # local WS/TCP echo servers (ws://localhost:8124, tcp://localhost:8125)
+bun run socketio:demo # local Socket.IO demo server (http://localhost:6021/, namespace /admin)
 ```
 
 ## Build
