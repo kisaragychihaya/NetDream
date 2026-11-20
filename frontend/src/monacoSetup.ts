@@ -56,24 +56,60 @@ interface NDResponse {
 /** 摘要输出的编码方式：hex（默认）、标准 base64、URL 安全 base64（无 padding）。 */
 type NDCryptoEncoding = "hex" | "base64" | "base64url";
 
-/** AES 工作模式：cbc（默认，PKCS#7 填充）或 gcm（认证加密）。 */
-type NDCryptoAesMode = "cbc" | "gcm";
+/**
+ * 对称加密工作模式：cbc（默认，PKCS#7 填充）、ecb（PKCS#7 填充、iv 必须为空）
+ * 或 gcm（仅 AES，认证加密）。
+ */
+type NDCryptoAesMode = "cbc" | "ecb" | "gcm";
+
+/** DES / 3DES 工作模式：cbc（默认）或 ecb；gcm 在运行时会抛异常，类型层面不允许。 */
+type NDDesMode = "cbc" | "ecb";
+
+/** 字节级 API 接受的输入：Uint8Array 或 ArrayBuffer。 */
+type NDCryptoBytes = Uint8Array | ArrayBuffer;
+
+/** HMAC / PBKDF2 支持的摘要算法（大小写不敏感）。 */
+type NDCryptoHashAlgo = "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512";
+
+/** RSA 签名/验签支持的摘要算法（拒绝 md5）。 */
+type NDCryptoRsaHash = "sha1" | "sha224" | "sha256" | "sha384" | "sha512";
+
+/** JWT 算法：HS* 的 secret 是字符串，RS* 的 secret 是 PEM 私钥/公钥。 */
+type NDCryptoJwtAlgo = "HS256" | "HS384" | "HS512" | "RS256" | "RS384" | "RS512";
 
 /**
- * 哈希 / HMAC / AES / 编码 / 随机数。
- * 参数与返回值一律是字符串（变量只能存字符串），字节用 base64 或 hex 表达。
+ * 哈希 / HMAC / 对称加密 / RSA / PBKDF2 / JWT / 编码 / 随机数。
+ * 参数与返回值默认是字符串（变量只能存字符串），字节用 base64、hex 或 raw 表达；
+ * 需要真正的字节数组时用 bytesFromBase64 / bytesFromHex（返回 Uint8Array），
+ * 或用 bytesToBase64 / bytesToHex 编码 Uint8Array / ArrayBuffer。
+ *
+ * 注意：沙箱内置的 Uint8Array.prototype.toBase64/toHex 按 UTF-16 码元逐字节
+ * 处理，含中文或 ≥0x80 的字节会被截断；UTF-8 字节请走本接口的 bytes* 方法。
+ *
+ * key / iv / 签名等二进制字符串支持前缀：hex:（十六进制）、b64:（标准 base64）、
+ * raw:（字面 UTF-8 字节）；无前缀按标准 base64 解码（兼容旧脚本）。
  */
 interface NDCrypto {
   /** MD5 摘要，按 UTF-8 取字节。 */
   md5(data: string, encoding?: NDCryptoEncoding): string;
   /** SHA-1 摘要。 */
   sha1(data: string, encoding?: NDCryptoEncoding): string;
+  /** SHA-224 摘要。 */
+  sha224(data: string, encoding?: NDCryptoEncoding): string;
   /** SHA-256 摘要。 */
   sha256(data: string, encoding?: NDCryptoEncoding): string;
+  /** SHA-384 摘要。 */
+  sha384(data: string, encoding?: NDCryptoEncoding): string;
   /** SHA-512 摘要。 */
   sha512(data: string, encoding?: NDCryptoEncoding): string;
-  /** HMAC：data 与 key 均按 UTF-8 取字节。 */
-  hmac(algo: "md5" | "sha1" | "sha256" | "sha512", data: string, key: string, encoding?: NDCryptoEncoding): string;
+  /**
+   * HMAC。注意参数顺序是 key 在前、data 在后（旧版是 data 在前，迁移时对调）。
+   * @param algo 摘要算法（大小写不敏感）
+   * @param key 密钥，按 UTF-8 取字节
+   * @param data 消息
+   * @param encoding 输出编码，默认 "hex"
+   */
+  hmac(algo: NDCryptoHashAlgo, key: string, data: string, encoding?: NDCryptoEncoding): string;
   /** 标准 base64 编码（UTF-8 安全，中文可直接传入）。 */
   base64Encode(data: string): string;
   /** 标准 base64 解码；非法输入抛异常。 */
@@ -86,10 +122,74 @@ interface NDCrypto {
   hexEncode(data: string): string;
   /** 十六进制解码；非法字符抛异常。 */
   hexDecode(data: string): string;
-  /** AES 加密，返回 base64 密文；key、iv 为 base64，key 需 16/24/32 字节，cbc 的 iv 16 字节、gcm 的 iv 12 字节。 */
-  aesEncrypt(data: string, key: string, iv: string, mode?: NDCryptoAesMode): string;
-  /** AES 解密，输入 base64 密文；cbc 会校验 PKCS#7 填充。 */
-  aesDecrypt(data: string, key: string, iv: string, mode?: NDCryptoAesMode): string;
+  /** RFC 3986 百分号编码：unreserved 透传、空格→%20、/→%2F、hex 大写；不会输出 +。 */
+  urlEncode(data: string): string;
+  /** RFC 3986 解码；+ 按字面加号处理，非法百分号编码抛异常。 */
+  urlDecode(data: string): string;
+  /** 把 Uint8Array / ArrayBuffer 编成标准 base64。 */
+  bytesToBase64(bytes: NDCryptoBytes): string;
+  /** 把标准 base64 解成真正的 Uint8Array（可索引、instanceof Uint8Array）。 */
+  bytesFromBase64(text: string): Uint8Array;
+  /** 把 Uint8Array / ArrayBuffer 编成小写 hex 字符串。 */
+  bytesToHex(bytes: NDCryptoBytes): string;
+  /** 把 hex 字符串解成真正的 Uint8Array（可索引、instanceof Uint8Array）；非法字符抛异常。 */
+  bytesFromHex(text: string): Uint8Array;
+  /**
+   * AES 加密，返回 base64 密文。
+   * @param key 16/24/32 字节（AES-128/192/256），支持 hex:/b64:/raw: 前缀，默认 base64
+   * @param iv cbc 需 16 字节；ecb 省略或空串；gcm 省略时自动生成 12 字节随机 nonce
+   * @param mode 默认 "cbc"
+   */
+  aesEncrypt(data: string, key: string, iv?: string | null, mode?: NDCryptoAesMode): string;
+  /**
+   * AES 解密，输入 base64 密文；cbc/ecb 会校验 PKCS#7 填充。
+   * gcm 密文格式为 nonce‖密文‖tag：iv 省略时自动从密文前 12 字节切分 nonce；
+   * 显式给 iv 时按该 nonce 解密，同时兼容带 nonce 前缀的新密文和无前缀的旧密文。
+   */
+  aesDecrypt(data: string, key: string, iv?: string | null, mode?: NDCryptoAesMode): string;
+  /**
+   * DES（8 字节 key）或 3DES（16/24 字节 key）加密，返回 base64；仅支持 cbc/ecb。
+   * 16 字节 key 按 2-key 3DES（K1‖K2‖K1）展开。
+   */
+  desEncrypt(data: string, key: string, iv?: string | null, mode?: NDDesMode): string;
+  /** DES / 3DES 解密；仅支持 cbc/ecb（gcm 会抛异常）。 */
+  desDecrypt(data: string, key: string, iv?: string | null, mode?: NDDesMode): string;
+  /**
+   * RSA PKCS#1 v1.5 签名，返回 base64。
+   * @param privateKey PKCS#1 或 PKCS#8 的 RSA PEM
+   * @param hash 摘要算法，默认 "sha256"（拒绝 md5）
+   */
+  rsaSign(data: string, privateKey: string, hash?: NDCryptoRsaHash): string;
+  /** RSA PKCS#1 v1.5 验签；signature 为 base64，返回是否通过。 */
+  rsaVerify(data: string, signature: string, publicKey: string, hash?: NDCryptoRsaHash): boolean;
+  /** RSA-PSS 签名（SaltLength = hash 长度），返回 base64。 */
+  rsaPssSign(data: string, privateKey: string, hash?: NDCryptoRsaHash): string;
+  /** RSA-PSS 验签；signature 为 base64，返回是否通过。 */
+  rsaPssVerify(data: string, signature: string, publicKey: string, hash?: NDCryptoRsaHash): boolean;
+  /** RSA PKCS#1 v1.5 公钥加密，返回 base64。 */
+  rsaEncrypt(data: string, publicKey: string): string;
+  /** RSA PKCS#1 v1.5 私钥解密，输入 base64。 */
+  rsaDecrypt(data: string, privateKey: string): string;
+  /**
+   * PBKDF2（RFC 2898），返回 base64。
+   * @param iterations 迭代次数，1–10,000,000
+   * @param keyLen 输出字节数，1–4096
+   * @param hash 默认 "sha256"
+   */
+  pbkdf2(password: string, salt: string, iterations: number, keyLen: number, hash?: NDCryptoHashAlgo): string;
+  /**
+   * JWT 签名。header 固定为 {"alg": algo, "typ": "JWT"}。
+   * @param payload 可 JSON 序列化的值
+   * @param secretOrKey HS* 为字符串 secret；RS* 为 PEM 私钥
+   * @param algo 默认 "HS256"
+   */
+  jwtSign(payload: any, secretOrKey: string, algo?: NDCryptoJwtAlgo): string;
+  /**
+   * JWT 验签，成功返回解析后的 payload 对象。
+   * 传了 algo 时先比对 header.alg（防止 alg 降级），不一致或验签失败都抛异常。
+   * @param secretOrKey HS* 为字符串 secret；RS* 为 PEM 公钥
+   */
+  jwtVerify(token: string, secretOrKey: string, algo?: NDCryptoJwtAlgo): any;
   /** crypto/rand 生成 n 字节（1–4096），返回 base64。 */
   randomBytes(n: number): string;
   /** crypto/rand 生成 n 字节（1–4096），返回 hex。 */
@@ -107,19 +207,21 @@ interface NDTime {
   /** 当前秒时间戳，等价 Math.floor(Date.now() / 1000)。 */
   unix(): number;
   /**
-   * 按 Go 布局格式化毫秒时间戳。
+   * 按布局格式化毫秒时间戳。
    * @param ms 毫秒时间戳（如 Date.now() 或 parse() 的返回值）
-   * @param layout Go 参考时刻写法，如 "2006-01-02 15:04:05"：2006 年、01 月、
-   *   02 日、15 时（24 小时制）、04 分、05 秒、.000 毫秒、MST 时区缩写、
-   *   -07:00 偏移（Z07:00 在 UTC 输出 Z）。不能为空。
+   * @param layout 两种写法：token 布局（含 YY 或 SSS 时启用，如
+   *   "YYYY-MM-DD HH:mm:ss.SSS"：YYYY/YY 年、MM/M 月、DD/D 日、HH/H 时、
+   *   mm/m 分、ss/s 秒、SSS 毫秒），或 Go 参考时刻布局（如
+   *   "2006-01-02 15:04:05"：2006 年、01 月、02 日、15 时、04 分、05 秒、
+   *   .000 毫秒、MST 时区缩写、-07:00 偏移）。不能为空。
    * @param timeZone IANA 时区名（如 "Asia/Shanghai"、"UTC"）；省略或空串按本地时区。
-   *   不认识的名字会抛异常。
+   *   不认识的名字会抛异常。时区数据库已内嵌在可执行文件里。
    */
   format(ms: number, layout: string, timeZone?: string): string;
   /**
-   * 按 Go 布局严格解析时间字符串，返回毫秒时间戳。
+   * 按布局严格解析时间字符串，返回毫秒时间戳。
    * @param s 要解析的文本
-   * @param layout Go 参考时刻写法，必须与 s 的结构一致
+   * @param layout 与 format 相同的两种写法（token 布局或 Go 布局），必须与 s 的结构一致
    * @param timeZone 解读 s 时用的 IANA 时区名；省略或空串按本地时区
    * @returns 毫秒时间戳；字符串不符合布局或日期不存在（如 "2025-02-31"）时返回
    *   null（不抛异常，和 Date.parse 的静默归一化不同）。
@@ -146,9 +248,9 @@ interface ND {
   test(name: string, fn: () => void): void;
   /** 断言：条件不成立时抛异常（在 nd.test 内即记为失败）。 */
   assert(cond: unknown, message?: string): void;
-  /** 哈希 / HMAC / AES / base64、hex 编码 / 随机数：字符串进出，UTF-8 安全。 */
+  /** 哈希 / HMAC / 对称加密 / RSA / PBKDF2 / JWT / 编码 / 随机数；UTF-8 安全。 */
   crypto: NDCrypto;
-  /** 时间戳、Go 布局的格式化与解析、本地时区：时区语义明确，优先于 Date。 */
+  /** 时间戳、token 或 Go 布局的格式化与解析、本地时区：时区语义明确，优先于 Date。 */
   time: NDTime;
 }
 

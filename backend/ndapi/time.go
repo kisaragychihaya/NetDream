@@ -88,14 +88,37 @@ func (run *Run) timeText(name string, call goja.FunctionCall, i int, label strin
 	return text
 }
 
+// timeLayoutTokens maps the date tokens JavaScript developers know onto the Go
+// reference layout, longest first so "YYYY" wins over "YY" and "SSS" over "s".
+var timeLayoutTokens = []struct{ token, repl string }{
+	{"YYYY", "2006"}, {"YY", "06"}, {"SSS", "000"},
+	{"MM", "01"}, {"DD", "02"}, {"HH", "15"}, {"mm", "04"}, {"ss", "05"},
+	{"M", "1"}, {"D", "2"}, {"H", "3"}, {"m", "4"}, {"s", "5"},
+}
+
+// translateTimeLayout converts a layout mixing the tokens above (for example
+// "YYYY-MM-DD HH:mm:ss") into the Go reference layout. A layout without a year
+// or sub-second token is assumed to already be a Go layout and passes through
+// unchanged, so "2006-01-02" keeps working.
+func translateTimeLayout(layout string) string {
+	if !strings.Contains(layout, "YY") && !strings.Contains(layout, "SSS") {
+		return layout
+	}
+	for _, t := range timeLayoutTokens {
+		layout = strings.ReplaceAll(layout, t.token, t.repl)
+	}
+	return layout
+}
+
 // timeLayout reads the layout argument, which has to say what to output or
-// match: an empty one formats every value to an empty string.
+// match. Either spelling is accepted: the token layout above or a plain Go
+// layout.
 func (run *Run) timeLayout(name string, call goja.FunctionCall, i int) string {
 	layout := run.timeText(name, call, i, "layout")
 	if strings.TrimSpace(layout) == "" {
 		panic(run.newError(name + "(): 参数 layout 不能为空"))
 	}
-	return layout
+	return translateTimeLayout(layout)
 }
 
 // timeOptional reads argument i as text; absent, null, undefined and a blank

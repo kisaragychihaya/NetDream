@@ -29,8 +29,8 @@ NetDream 的每个 HTTP 请求可以挂两段 JavaScript：**预执行脚本**�
 | `nd.response` | 仅后脚本：`{ status, statusText, headers, body, timeMS, sizeBytes }` + `json()` |
 | `nd.test(name, fn)` | 断言：`fn` 抛异常 = 失败（不中断脚本）；结果进断言面板「脚本测试」 |
 | `nd.assert(cond, msg?)` | `cond` 为假即抛 `Error(msg)` |
-| `nd.crypto` | 哈希 / HMAC / AES / 编码 / 随机数，全部**字符串进出**（见下文） |
-| `nd.time` | 毫秒/秒时间戳、Go 布局的格式化与严格解析、本地时区偏移（见下文） |
+| `nd.crypto` | 哈希 / HMAC / AES / DES / RSA / PBKDF2 / JWT / 编码 / 随机数（见下文） |
+| `nd.time` | 毫秒/秒时间戳、token 或 Go 布局的格式化与严格解析、本地时区偏移（见下文） |
 | `console.log / warn / error(...)` | 参数 JSON 序列化后以空格拼接，进响应区「控制台」页签 |
 
 编辑器（Monaco）已内置上述 API 的补全与悬浮文档，直接输入 `nd.` 即可看到。
@@ -50,37 +50,91 @@ NetDream 的每个 HTTP 请求可以挂两段 JavaScript：**预执行脚本**�
 记为「后执行脚本错误」，但**不影响已拿到的响应**）。SSE 流式响应的后脚本
 `body` 为空是正常情况。
 
-### `nd.crypto`（哈希 / HMAC / 加密 / 编码）
+### `nd.crypto`（哈希 / HMAC / 加密 / 签名 / 编码）
 
-所有参数与返回值都是**字符串**（变量也只存字符串），字节一律用 base64 或 hex
-表达。参数个数/类型错误、非法的 encoding/mode/algo、解码失败都会抛异常，
+> **⚠️ 不要用 `Uint8Array.prototype.toBase64/toHex` 处理中文**：沙箱内置的这些
+> 方法按 UTF-16 码元逐字节处理，含中文或 ≥0x80 的字节会被截断。字节级往返请用
+> `nd.crypto.bytesToBase64` / `bytesFromBase64` / `bytesToHex` / `bytesFromHex`
+> （真正的 `Uint8Array`），或直接用下面的字符串 API（按 UTF-8 处理）。
+
+所有字符串参数与返回值按 UTF-8 取字节；密钥、IV、签名、密文等二进制数据用
+**带前缀的字符串**表达：
+
+| 写法 | 含义 |
+| --- | --- |
+| 无前缀 | 标准 base64（兼容旧脚本） |
+| `hex:` | 十六进制，如 `hex:00112233` |
+| `b64:` | 标准 base64（显式写法） |
+| `raw:` | 字面 UTF-8 字节，如 `raw:0123456789abcdef` |
+
+参数个数/类型错误、非法的 encoding/mode/algo、解码失败都会抛异常（中文消息），
 可用 `try/catch` 接住。
 
 | 调用 | 说明 |
 | --- | --- |
-| `md5(s, encoding?)`、`sha1`、`sha256`、`sha512` | `s` 按 UTF-8 取字节；`encoding` 默认 `'hex'`，可选 `'base64'` / `'base64url'`（无 padding） |
-| `hmac(algo, data, key, encoding?)` | `algo`：`'md5'`/`'sha1'`/`'sha256'`/`'sha512'`（大小写不敏感）；`key`、`data` 均按 UTF-8，`encoding` 同上 |
+| `md5(data, encoding?)`、`sha1`、`sha224`、`sha256`、`sha384`、`sha512` | `encoding` 默认 `'hex'`，可选 `'base64'` / `'base64url'`（无 padding） |
+| `hmac(algo, key, data, encoding?)` | **key 在前、data 在后**；`algo`：`'md5'`/`'sha1'`/`'sha224'`/`'sha256'`/`'sha384'`/`'sha512'`（大小写不敏感） |
 | `base64Encode(s)` / `base64Decode(s)` | 标准 base64；**UTF-8 安全**，中文直接传入即可 |
 | `base64UrlEncode(s)` / `base64UrlDecode(s)` | URL 安全 base64：编码不带 padding，解码两种写法都接受 |
 | `hexEncode(s)` / `hexDecode(s)` | 同样 UTF-8 安全；`hexDecode` 遇非法字符抛异常 |
-| `aesEncrypt(data, key, iv, mode?)` / `aesDecrypt(data, key, iv, mode?)` | `key` 与 `iv` 是 **base64 字符串**；密文输出 base64，解密输入 base64 |
+| `urlEncode(s)` / `urlDecode(s)` | RFC 3986 百分号编码：unreserved 字符透传、空格→`%20`、`/`→`%2F`、hex 大写；解码把 `+` 当字面加号（不是空格） |
+| `bytesToBase64(bytes)` | `bytes` 为 `Uint8Array` 或 `ArrayBuffer`，返回标准 base64 |
+| `bytesFromBase64(text)` | 解码标准 base64，返回真正的 `Uint8Array`（可索引、`instanceof Uint8Array`） |
+| `bytesToHex(bytes)` | `bytes` 为 `Uint8Array` 或 `ArrayBuffer`，返回小写 hex 字符串 |
+| `bytesFromHex(text)` | 解码 hex 字符串，返回真正的 `Uint8Array`；非法字符抛异常 |
+| `aesEncrypt(data, key, iv?, mode?)` / `aesDecrypt(data, key, iv?, mode?)` | `mode`：`'cbc'`（默认）/`'ecb'`/`'gcm'`；密文输出/输入均为 base64 |
+| `desEncrypt(data, key, iv?, mode?)` / `desDecrypt(data, key, iv?, mode?)` | key 8 字节=DES、16/24 字节=3DES；仅支持 `'cbc'` / `'ecb'` |
+| `rsaSign(data, privateKey, hash?)` / `rsaVerify(data, signature, publicKey, hash?)` | PKCS#1 v1.5；`hash` 默认 `'sha256'`，可选 sha1/sha224/sha256/sha384/sha512（**拒绝 md5**）；`signature` 为 base64，verify 返回 boolean |
+| `rsaPssSign(data, privateKey, hash?)` / `rsaPssVerify(data, signature, publicKey, hash?)` | PSS 签名（SaltLength = hash 长度），参数与 PKCS#1 v1.5 版本一致 |
+| `rsaEncrypt(data, publicKey)` / `rsaDecrypt(data, privateKey)` | PKCS#1 v1.5 公钥加密/私钥解密，密文 base64 |
+| `pbkdf2(password, salt, iterations, keyLen, hash?)` | RFC 2898；`hash` 默认 `'sha256'`；`iterations` 1–10,000,000，`keyLen` 1–4096；返回 base64 |
+| `jwtSign(payload, secretOrKey, algo?)` / `jwtVerify(token, secretOrKey, algo?)` | `algo`：HS256/HS384/HS512/RS256/RS384/RS512，默认 HS256；HS* 的 secret 是字符串，RS* 是 PEM 私钥/公钥 |
 | `randomBytes(n)` / `randomHex(n)` | `crypto/rand` 生成 `n` 字节（1–4096），分别返回 base64 / hex |
 
-AES 细节：
+对称加密细节：
 
-- `key` 解码后必须是 16 / 24 / 32 字节（AES-128/192/256），否则抛异常。
-- `mode` 默认 `'cbc'`：PKCS#7 填充，`iv` 必须 16 字节；`'gcm'`：`iv` 是 nonce，
-  必须 12 字节，密文自带认证标签，解密校验失败即抛异常。
-- CBC 解密会校验 PKCS#7 填充，key 或 iv 不对时报「解密失败」而不是返回乱码。
+- `key` 解码后：AES 必须 16 / 24 / 32 字节（AES-128/192/256）；DES 8 字节；
+  3DES 16 字节（按 2-key 3DES 展开为 K1‖K2‖K1）或 24 字节。
+- `'cbc'`：PKCS#7 填充，`iv` 必须等于块大小（AES 16 字节 / DES 8 字节）。
+- `'ecb'`：`iv` 必须省略或为空串；PKCS#7 填充按块大小（AES 16 / DES 8）。
+- `'gcm'`（仅 AES）：输出为 `base64(nonce ‖ 密文 ‖ tag)`。`iv` 省略时自动生成
+  12 字节随机 nonce；解密时自动从密文前 12 字节切分 nonce。显式传 `iv` 时必须是
+  12 字节（兼容旧调用）；解密时显式 nonce 同时接受带 nonce 前缀的新密文与
+  `密文‖tag` 的旧格式密文。
+- CBC / ECB 解密会校验 PKCS#7 填充，key 或 iv 不对时报「解密失败」而不是返回乱码。
+
+RSA 细节：
+
+- 私钥 PEM 支持 PKCS#1（`RSA PRIVATE KEY`）与 PKCS#8（`PRIVATE KEY`），且必须是
+  RSA；公钥支持 PKIX（`PUBLIC KEY`）与 PKCS#1（`RSA PUBLIC KEY`）。
+- 签名/验签使用 PKCS#1 v1.5（`rsaSign`/`rsaVerify`）或 PSS
+  （`rsaPssSign`/`rsaPssVerify`），签名值统一 base64 进出。
+
+JWT 细节：
+
+- header 固定为 `{"alg": "<algo>", "typ": "JWT"}`，两段均用无 padding 的
+  URL 安全 base64。
+- `jwtVerify` 解析 `header.alg`；传了期望 `algo` 时先比对，不一致直接抛异常
+  （防止 alg 降级）。验签失败抛异常，成功返回解析后的 payload JS 对象（不校验
+  exp/nbf 等时间声明）。
 
 ```js
 nd.vars.set("sig", nd.crypto.sha256("app_id=1&ts=" + Date.now()));
 nd.vars.set("token", nd.crypto.base64Encode("中文 token 也能正确编码"));
+nd.request.headers["X-Sign"] = nd.crypto.hmac("sha256", "my-secret", "app_id=1&ts=1");
 ```
 
-> 沙箱内置了 `Uint8Array.prototype.toBase64/toHex/fromBase64/fromHex`（以及
-> `Uint8Array.fromBase64/fromHex`），纯 ASCII 场景可以直接用；但它按 UTF-16
-> 码元逐字节处理，中文会被截断——**UTF-8 场景请走 `nd.crypto`**。
+#### 从旧版迁移（破坏性变更）
+
+1. **`hmac` 参数顺序反转**：旧的 `hmac(algo, data, key, encoding?)` 改为
+   `hmac(algo, key, data, encoding?)`。迁移时把第 2、3 个参数对调即可；同时
+   `algo` 新增了 `sha224` / `sha384`。
+2. **AES-GCM 输出格式变更**：旧实现输出 `密文‖tag`，且必须显式传 12 字节
+   `iv`；新实现输出 `nonce‖密文‖tag`，`iv` 可省略。旧脚本若要解历史密文，继续
+   显式传原来的 nonce 即可（`aesDecrypt(oldCt, key, oldNonce, "gcm")`）；若把旧
+   密文当新格式（省略 iv）解，会因把密文前 12 字节当成 nonce 而校验失败。
+3. key/iv 无前缀时仍按 base64 解码，旧脚本无需改动；需要更直观的写法时可用
+   `hex:` / `raw:` 前缀。
 
 ### `nd.time`（时间）
 
@@ -92,35 +146,42 @@ nd.vars.set("token", nd.crypto.base64Encode("中文 token 也能正确编码"));
 | --- | --- | --- |
 | `now()` | `number` | 当前毫秒时间戳（等价 `Date.now()`） |
 | `unix()` | `number` | 当前秒时间戳（等价 `Math.floor(Date.now()/1000)`） |
-| `format(ms, layout, timeZone?)` | `string` | 按 **Go 布局**格式化 `ms`（毫秒时间戳）；`timeZone` 是 IANA 名，省略或空串按本地时区 |
-| `parse(s, layout, timeZone?)` | `number \| null` | 按 Go 布局**严格解析**成毫秒时间戳；字符串不符合布局或日期不存在时返回 `null`，**不抛异常** |
+| `format(ms, layout, timeZone?)` | `string` | 按 `layout` 格式化 `ms`（毫秒时间戳）；`timeZone` 是 IANA 名，省略或空串按本地时区 |
+| `parse(s, layout, timeZone?)` | `number \| null` | 按 `layout` **严格解析**成毫秒时间戳；字符串不符合布局或日期不存在时返回 `null`，**不抛异常** |
 | `offset()` | `number` | 本地时区偏移的**分钟数**，符号同 `Date.getTimezoneOffset()`（东八区是 `-480`） |
 | `zone()` | `string` | 本地时区名（`time.Local`；Windows 上通常是 `Local`） |
 
-`layout` 用 Go 参考时刻的写法，常用的几个：
+`layout` 支持两种写法，`format` 与 `parse` 共用：
 
-| 写法 | 含义 |
-| --- | --- |
-| `2006` | 年 |
-| `01` | 月（`1` 不补零） |
-| `02` | 日 |
-| `15` | 时（24 小时制；`03` 是 12 小时制） |
-| `04` / `05` | 分 / 秒 |
-| `.000` | 毫秒（`.999` 去掉末尾 0） |
-| `MST` | 时区缩写 |
-| `-07:00` | 偏移（`Z07:00` 在 UTC 输出 `Z`） |
-| `Mon` / `Jan` / `Monday` | 星期 / 月份名 |
+- **token 布局**（JavaScript 习惯）：含 `YY` 或 `SSS` 时按 token 表翻译。
+- **Go 参考布局**：不含上述 token 时原样使用，例如 `2006-01-02`。
 
-`timeZone` 接受 `time.LoadLocation` 认识的 IANA 名，如 `Asia/Shanghai`、
-`UTC`、`America/New_York`；写错会抛「不支持的 timeZone」。
+| token | Go 布局 | 含义 |
+| --- | --- | --- |
+| `YYYY` / `YY` | `2006` / `06` | 四位 / 两位年 |
+| `MM` / `M` | `01` / `1` | 月（补零 / 不补零） |
+| `DD` / `D` | `02` / `2` | 日 |
+| `HH` / `H` | `15` / `3` | 时（`HH` 为 24 小时制；`H` 为 12 小时制且不补零，容易误用，建议直接写 Go 布局） |
+| `mm` / `m` | `04` / `4` | 分 |
+| `ss` / `s` | `05` / `5` | 秒 |
+| `SSS` | `000` | 毫秒（固定 3 位） |
+
+常用 Go 布局写法：`2006` 年、`01` 月、`02` 日、`15` 时（24 小时制；`03` 是
+12 小时制）、`04`/`05` 分/秒、`.000` 毫秒（`.999` 去掉末尾 0）、`MST`
+时区缩写、`-07:00` 偏移（`Z07:00` 在 UTC 输出 `Z`）、`Mon`/`Jan`/`Monday`
+星期/月份名。
+
+`timeZone` 接受 `time.LoadLocation` 认识的 IANA 名，如 `Asia/Shanghai`、`UTC`、
+`America/New_York`；写错会抛「不支持的 timeZone」。IANA 时区数据库已随可执行
+文件内嵌（`time/tzdata`），Windows 上无需额外的 zoneinfo 文件。
 
 ```js
 // 解析固定格式的服务器时间（严格：不符合布局就是 null，不会瞎猜）
-var ms = nd.time.parse("2025-01-01 08:00:00", "2006-01-02 15:04:05", "Asia/Shanghai");
+var ms = nd.time.parse("2025-01-01 08:00:00.123", "YYYY-MM-DD HH:mm:ss.SSS", "Asia/Shanghai");
 nd.assert(ms !== null, "响应里的时间格式不符合布局");
 
 // 反过来格式化：一天之后、同样的时区
-nd.vars.set("next_day", nd.time.format(ms + 86400000, "2006-01-02", "Asia/Shanghai")); // "2025-01-02"
+nd.vars.set("next_day", nd.time.format(ms + 86400000, "YYYY-MM-DD", "Asia/Shanghai")); // "2025-01-02"
 nd.request.headers["X-Timestamp"] = String(nd.time.unix());
 ```
 
