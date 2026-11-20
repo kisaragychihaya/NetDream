@@ -47,6 +47,14 @@ func main() {
 		// 激活 mygo 原生文件拖放的路径投递（需至少一个 Go 侧监听器）；
 		// 路径经 mygo:file-drop 页面事件由前端 mygo-runtime 的 onFileDrop 接收。
 		win.OnFileDrop(func(*mygo.FileDropEvent) {})
+		if !mygo.IsDev() {
+			// 发布版屏蔽 WebView 自带的右键菜单（Reload/Back/Forward 等）。
+			// 开发者工具在发布版本就关闭：DevToolsAuto（默认）在
+			// `mygo build` 产物里（production ldflag）自动禁用。
+			win.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
+				e.PreventDefault()
+			})
+		}
 		// 记住窗口并让有未保存改动时的关闭先问过页面（见 close.go）。
 		guardWindow(win)
 	})
