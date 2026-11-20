@@ -392,7 +392,7 @@ Version="3" 时的 Socket.IO v2 / Engine.IO v3）；**不实现 long-polling，�
 ```
 workspace.json          # {"version": 1, "name": "工作区名", "folders": [...]}
 engine/vars.json        # 脚本变量（Record<string,string>）；缺失/解析失败 = 空
-requests/<id>.json      # 每个已保存请求一个文件，JSON（SavedRequest，缩进格式）
+requests/<id>.json      # 每个已保存请求 / Markdown 文档一个文件，JSON（SavedRequest，缩进格式）
 ```
 
 `workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 与
@@ -465,7 +465,8 @@ type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID         string           `json:"id"`
 	Name       string           `json:"name"`
-	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band）
+	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band）
+	Markdown   string           `json:"markdown"` // kind="markdown" 的文档内容；其余 kind 恒为空串
 	Method     string           `json:"method"`
 	URL        string           `json:"url"`
 	Params     []KeyValue       `json:"params"`
@@ -543,18 +544,23 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
 ```
 
 视图切换：编辑器 `kind` 变化时 main.ts 切两组响应区的 `hidden`——http 显示
-`#res-tabs/#res-content/#assert-panel`、隐藏 `#socket-res-*`；socket 反之。
+`#res-tabs/#res-content/#assert-panel`、隐藏 `#socket-res-*`；socket 反之；
+**markdown 把 `#req-tabs` 与整个 `#response-pane` 一起收起**（`[hidden]` 在各元素
+的 display 规则里有 `display: none` 覆盖，UA 默认样式压不过），`#req-panel` 里
+只显示 markdown 视图，`overflow` 放开为 `visible`（工具栏气泡向上弹，不能被面板裁剪）。
 请求页签集同样按 kind 切换（见「行为细节」）。
 
 ### state.ts
 
 - `RequestState`：method/url/params/headers/pathParams/bodyType/formData/urlEncoded/raw/rawType/
   binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP/Socket.IO 追加**：
-  `kind: "http" | "websocket" | "tcp" | "socketio"`（默认 "http"）、`messages: SavedMessage[]`
+  `kind: "http" | "websocket" | "tcp" | "socketio" | "markdown"`（默认 "http"）、`messages: SavedMessage[]`
   （已存消息模板，Socket.IO 模板带 `event`）、`socketProtocol: string`（WS 子协议，设置页编辑）、
   `socketEvents: SavedSocketEvent[]`（Socket.IO 事件定义）、`socketIOVersion: string`
   （"4" 默认 / "3"，映射 `SocketConnectParams.version`）、`socketIOPath: string`
-  （Engine.IO 握手路径，映射 `SocketConnectParams.path`）。后三项随 .band 持久化并原样回读。
+  （Engine.IO 握手路径，映射 `SocketConnectParams.path`）、`markdown: string`
+  （kind="markdown" 的文档内容，其余 kind 恒为空串）。messages/socketEvents 与三个字符串字段
+  随 .band 持久化并原样回读。
 - 变量 store（应用级，随工作区文件保存）：`getVars/setVars/updateVars/subscribeVars`，
   **纯内存、不写 localStorage**（关闭即清空，避免凭据外泄）；`loadWorkspace` 用
   `file.data.vars` 整体替换（走不置脏的 replaceVars 安静路径），保存时
@@ -570,9 +576,16 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
 - 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
   Socket 会话（日志/连接状态）也不持久化。
-- `newRequest(kind)` 按类型重置编辑器；`snapshotCurrent()` 快照带 kind/messages/socketEvents，
-  命名规则：HTTP `METHOD host/path`；WS `WS host/path`；Socket.IO `SIO host/path`；
-  TCP `TCP host:port`（截断 40 字符）。
+- `newRequest(kind)` 按类型重置编辑器；`newMarkdownDocument()` 新建未命名
+  Markdown 文档**并入册**（currentId 指向新条目、置脏——文档没有「发送」动作，
+  沿用请求的「执行后才收编」规则会无处可改名）；`snapshotCurrent()` 快照带
+  kind/messages/socketEvents/markdown，命名规则：HTTP `METHOD host/path`；
+  WS `WS host/path`；Socket.IO `SIO host/path`；TCP `TCP host:port`（截断 40 字符）；
+  **markdown 返回空串**（无 URL 可推导，界面按当前语言给「未命名文档」，
+  与工作区空名的显示约定一致）。
+- `renameCurrentMarkdown(name)`：给当前文档改名；currentId 为 null 时（重启后
+  会话恢复、内存工作区为空）先 `upsertEntry(snapshotCurrent())` 收编成新条目再改，
+  名字不静默丢失。
 
 ### socket.ts
 
@@ -709,11 +722,12 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   `<div id="main-area">`（**原有 id 一律不动**，组件无感）。
   侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存 / 新建」
   （两字一组，title 给全名；「新建」= 新建工作区，脏时先过未保存守卫）；
-  「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接 / Socket.IO 连接，
-  末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` / `addFolder(null)`）；
+  「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接 / Socket.IO 连接 /
+  Markdown 文件，末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` /
+  `newMarkdownDocument()` / `addFolder(null)`）；
   可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
   脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
-  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章 + 名称 + 行尾 × 删除，
+  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章、Markdown = 蓝色 `MD` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。
 - 请求树（同一组件）：列表是树——文件夹行（折叠箭头 + 名称 + hover 时的
@@ -743,6 +757,28 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   （basename 或占位「未选择文件」、完整路径在 title、「选择」按钮经
   `RequestService.pickFile()` 选盘），容器带 `data-file-drop-index` 与 dragover
   高亮（纯视觉反馈）。`FormRow` 带 `kind/filePath`，随 .band 持久化（旧数据按文本行读）。
+
+### Markdown 文档
+
+- 条目模型见上：kind="markdown"、内容存 `SavedRequest.markdown`，与请求共用
+  .band 的 `requests/<id>.json`、工作区树、改名、删除、拖动；旧归档无该字段读出空串。
+- 编辑器 `components/markdownEditor.ts`（Vditor 4，**ir 即时渲染**默认，工具栏
+  可切分屏 / 所见即所得）。实例惰性创建（首次切到文档条目才加载 lute ≈3.6MB），
+  之后常驻；语言切换重建实例，主题切换走 `setTheme`。
+- **资源本地化离线可用**：`scripts/prepare-vditor.mjs`（predev/prebuild 自动跑）
+  把 node_modules/vditor/dist 里用到的部分（css、emoji 图、i18n、icons、
+  highlight.js、lute、mermaid）拷进 `frontend/public/vditor/dist`，初始化 `cdn: "vditor"`；
+  数学公式（katex/mathjax）与 echarts 等冷门图表**不随包分发**——相应选项关闭
+  （inlineMath/mathBlockPreview=false），文档里出现那些代码块按普通代码块显示。
+- **工具栏剔除** upload/record/export：无上传地址会卡上传态，录音走 getUserMedia
+  在桌面端挂起，导出触发 HTML 下载——对本地文档编辑器都不适用。
+- 顶栏（urlBar 自管，kind==="markdown" 分支）：隐藏方法选择器 / URL / h2c，
+  「发送」槽位换成**存入工作区**（`upsertEntry(snapshotCurrent())`，不写 .band，
+  按钮文案闪「已存入工作区」），旁边是**文档名输入框**（输入即 `renameCurrentMarkdown`，
+  回车/失焦去空格）。.band 落盘仍归侧栏保存/另存。
+- 内容双向绑定走 get/set/subscribe 约定（同 scriptEditor）；外部载入整篇替换并
+  `clearStack()`；Vditor 的 localStorage 缓存关闭（cache.enable=false），
+  持久化归 state.ts 的编辑器快照（300ms 防抖）。
 
 ### 多语言（src/i18n/）
 

@@ -2,11 +2,15 @@
 
 **一个使用 [MyGO](https://github.com/egoist/mygo) 开发的 Postman 离线替代品**
 
+[![Release](https://img.shields.io/github/v/release/kisaragychihaya/NetDream)](https://github.com/kisaragychihaya/NetDream/releases)
+
 English: [README.en.md](README.en.md)
 
 NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，系统 webview 渲染界面——没有 Electron，没有云端，没有账号，完全离线。
 
 ~~解压完才50M，我的内存和硬盘再也不会咕咕嘎嘎啦~~
+
+![NetDream 主界面（中文）](docs/imgs/main-cn.png)
 
 ## 特性
 
@@ -19,7 +23,11 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 - **断言面板**：状态码、包含 / 不包含、响应耗时
 - **预 / 后执行脚本**：goja 引擎执行——预脚本可改写请求、后脚本可断言响应，读写变量，日志进「控制台」页签、断言进断言面板
 - **变量**：侧栏可视化编辑，URL / Header / Body 等处 `{{变量名}}` 发送前替换，脚本经 `nd.vars` 读写同一份数据
-- **工作区（.band）**：一请求一文件的 zip 压缩包，支持打开 / 保存 / 另存为；`.band` 文件拖到窗口**任意位置**直接打开（原生拖放拿真实路径，保存写回原文件）；请求执行即自动入册内存工作区（成败都收），method / URL 变更后执行自动派生新条目，别名保留
+- **Markdown 文档**：侧栏「新建」即入册，Vditor 即时渲染（Typora 式，可切分屏 / 所见即所得），文档名顶栏直改；内容随 .band 条目落盘，「保存」= 存入左侧工作区；运行时资源本地化，离线可用
+- **请求分组**：侧栏多级文件夹，拖拽归类、删除内容上移一级，折叠记忆（不落盘）
+- **界面**：中文 / English / 日本語 + 跟随系统；浅色 / 深色 / 跟随系统主题；设置页含关于与版本信息
+- **系统代理跟随**：HTTP/SSE 与 WS/Socket.IO 握手按环境变量 → 系统代理（支持 bypass 通配 / CIDR / `<local>`）；TCP 直连
+- **工作区（.band）**：zip 归档——`workspace.json`（名称 + 请求树 folders）、`requests/` 一请求一文件、`engine/vars.json` 变量；打开 / 保存 / 另存为；拖到窗口直接打开（落在 form-data 文件字段上则填入该行路径）；请求执行即自动入册内存工作区（成败都收），method / URL 变更后执行自动派生新条目，别名保留；关窗 / 新建 / 打开前未保存守卫
 - **自动保存**：连接建立即入册，断开后自动刷新，保存 = 内存工作区整体落盘
 
 ## 脚本（预执行 / 后执行）
@@ -34,7 +42,7 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 
 - [MyGO](https://github.com/egoist/mygo)：Go 后端 + 系统 webview，绑定用 `mygo.Bind`，前端类型由 `mygo generate` 生成
 - 脚本引擎：[goja](https://github.com/dop251/goja)（纯 Go，无 CGO）
-- 前端：原生 TypeScript（strict；除脚本编辑器 monaco-editor 外零运行时依赖）+ Vite，UI 参照 ApiPost 调试页
+- 前端：原生 TypeScript（strict；运行时依赖仅脚本编辑器 monaco-editor 与 Markdown 编辑器 Vditor）+ Vite，UI 参照 ApiPost 调试页
 - 契约文档：[`docs/architecture.md`](docs/architecture.md)
 
 ## 快速开始
@@ -43,8 +51,8 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 
 ```bash
 bun install                  # 安装 mygo-cli
-bun install --cwd frontend   # 安装 vite / typescript
-bun run dev                  # 开发模式（热重载）
+bun install --cwd frontend   # 安装 vite / typescript / monaco-editor / vditor
+bun run dev                  # 开发模式（热重载；predev 自动把 Vditor 离线资源同步进 frontend/public/vditor）
 ```
 
 辅助脚本：
@@ -67,8 +75,11 @@ bunx mygo build -platform windows/amd64 -skip-installer
 
 ## 已知限制
 
-- 工作区路径不跨重启记忆；列表暂无搜索 / 排序
+- 工作区路径不跨重启记忆；重启只恢复编辑区草稿，列表需重新打开 .band
+- 侧栏列表暂无搜索；同级顺序靠拖入文件夹 / 根目录尾部调整（无同级拖动手柄）
+- Markdown 暂不支持数学公式、图片上传、录音与导出（运行时资源按需本地化，冷门图表块按普通代码块显示）
+- 「响应示例」页签为占位
 
 ## License
 
-MIT
+[MIT](LICENSE)
