@@ -4,3 +4,5 @@ build/
 .mygo/
 *.exe
 *.syso
+# Vditor 运行时资源由 scripts/prepare-vditor.mjs 从 node_modules 同步生成
+frontend/public/vditor/

@@ -25,8 +25,8 @@ const SAVE_DELAY_MS = 300;
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
 
-/** 编辑器四种类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接。 */
-export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio"] as const;
+/** 编辑器类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接、Markdown 文档。 */
+export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio", "markdown"] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 /** WS/Socket.IO 消息模板的类型（SavedMessage.msgType）。 */
@@ -99,6 +99,8 @@ export interface RequestState {
   preScript: string;
   /** 后执行脚本；空 = 不执行。 */
   postScript: string;
+  /** kind="markdown" 的文档内容；其余 kind 恒为空串。 */
+  markdown: string;
 }
 
 export interface ResponseState {
@@ -168,6 +170,7 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     socketIOPath: "",
     preScript: "",
     postScript: "",
+    markdown: "",
   };
 }
 
@@ -479,6 +482,7 @@ function hydrate(source: Record<string, unknown>): RequestState {
     socketIOPath: text(source.socketIOPath),
     preScript: text(source.preScript),
     postScript: text(source.postScript),
+    markdown: text(source.markdown),
   };
 }
 
@@ -664,6 +668,7 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     socketIOPath: text(saved.socketIOPath),
     preScript: text(saved.preScript),
     postScript: text(saved.postScript),
+    markdown: text(saved.markdown),
   };
 }
 
@@ -708,6 +713,45 @@ export function newRequest(kind: RequestKind = "http"): void {
   applyRequest(defaultRequest(kind));
 }
 
+/**
+ * 新建一条未命名 Markdown 文档并入册：文档没有「发送」动作，创建即出现在
+ * 工作区列表里（可当场双击或顶栏改名），编辑内容随保存工作区快照落盘。
+ */
+export function newMarkdownDocument(): void {
+  const entry: SavedRequest = {
+    id: newId(),
+    name: "",
+    kind: "markdown",
+    method: "",
+    url: "",
+    params: [],
+    headers: [],
+    bodyType: "none",
+    formData: [],
+    urlEncoded: [],
+    raw: "",
+    rawType: "json",
+    binaryPath: "",
+    auth: { type: "none", username: "", password: "", token: "" },
+    cookies: [],
+    timeout: 0,
+    http2: false,
+    assertions: [],
+    messages: [],
+    socketProtocol: "",
+    socketEvents: [],
+    socketIOVersion: "",
+    socketIOPath: "",
+    preScript: "",
+    postScript: "",
+    markdown: "",
+  };
+  workspace.entries = [...workspace.entries, entry];
+  workspace.currentId = entry.id;
+  applyRequest(requestFromSaved(entry));
+  setWorkspaceDirty(true);
+}
+
 export function loadEntry(id: string): void {
   const entry = workspace.entries.find((item) => item.id === id);
   if (entry === undefined) return;
@@ -734,6 +778,19 @@ export function renameEntry(id: string, name: string): void {
   entry.name = name;
   setWorkspaceDirty(true);
   notify();
+}
+
+/**
+ * 给当前 Markdown 文档改名。文档还没入册时（典型：应用重启后会话从本地快照
+ * 恢复、内存工作区是空的）先收编成一条新条目再改，名字不再静默丢失。
+ */
+export function renameCurrentMarkdown(name: string): void {
+  if (request.kind !== "markdown") return;
+  if (workspace.currentId === null) {
+    upsertEntry(snapshotCurrent());
+  }
+  const id = workspace.currentId;
+  if (id !== null) renameEntry(id, name);
 }
 
 export function renameWorkspace(name: string): void {
@@ -826,6 +883,9 @@ function newId(): string {
 const KIND_PREFIX: Partial<Record<RequestKind, string>> = { websocket: "WS", socketio: "SIO" };
 
 function generatedName(kind: RequestKind, method: string, url: string): string {
+  // Markdown 文档不参与自动命名：没有 URL 可推导，空名由界面按语言给
+  // 「未命名文档」（与工作区空名的显示约定一致）。
+  if (kind === "markdown") return "";
   const target = url.trim();
   let name: string;
   if (kind === "tcp") {
@@ -914,6 +974,7 @@ export function snapshotCurrent(): SavedRequest {
     socketIOPath: state.socketIOPath,
     preScript: state.preScript,
     postScript: state.postScript,
+    markdown: state.markdown,
   };
 }
 

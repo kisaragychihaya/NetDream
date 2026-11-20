@@ -5,6 +5,7 @@ import { mountAuthEditor } from "./components/authEditor";
 import { mountBodyEditor } from "./components/bodyEditor";
 import { mountConfirmDialog } from "./components/closeConfirm";
 import { mountKVTable } from "./components/kvTable";
+import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
 import { mountScriptEditor } from "./components/scriptEditor";
 import { mountSettings } from "./components/settings";
@@ -39,6 +40,7 @@ import {
   loadSavedRequest,
   loadWorkspace,
   moveRequest,
+  newMarkdownDocument,
   newRequest,
   newWorkspace,
   pushStreamEvent,
@@ -61,6 +63,9 @@ import {
 // 页签文案随语言变，所以每次按当前语言现建；id 与顺序是固定的。
 function requestTabs(kind: RequestKind): TabDef[] {
   switch (kind) {
+    case "markdown":
+      // Markdown 条目没有请求页签：主区整个让给文档编辑器。
+      return [];
     case "websocket":
       return [
         { id: "messages", label: t("tabs.messages") },
@@ -126,6 +131,7 @@ for (const id of [
   "messages",
   "events",
   "settings",
+  "markdown",
 ]) {
   const view = document.createElement("div");
   view.className = "req-view";
@@ -153,6 +159,8 @@ function rememberCurrentRequest(): void {
 
 async function send(): Promise<void> {
   if (getResponse().sending) return;
+  // Markdown 条目没有发送语义（顶栏整体隐藏，这里防的是快捷键等旁路入口）。
+  if (getRequest().kind === "markdown") return;
   if (getRequest().url.trim() === "") {
     document.querySelector<HTMLInputElement>("#url")?.focus();
     return;
@@ -376,6 +384,9 @@ mountUrlBar(topbar, {
   send: () => void send(),
   connect: () => connectSocket(),
   disconnect: () => disconnectSocket(),
+  // 文档的「保存」= 收进左侧工作区（更新条目内容、工作区置脏）；
+  // 写成 .band 文件仍归侧栏的保存/另存。
+  save: () => upsertEntry(snapshotCurrent()),
 });
 
 mountKVTable(viewOf("headers"), {
@@ -468,6 +479,18 @@ mountScriptEditor(
   subscribe,
 );
 
+// Markdown 文档编辑器：实例惰性创建（ensure），内容双向绑定到当前条目的 markdown 字段。
+const markdownEditor = mountMarkdownEditor(
+  viewOf("markdown"),
+  () => getRequest().markdown,
+  (value) => {
+    updateRequest((state) => {
+      state.markdown = value;
+    });
+  },
+  subscribe,
+);
+
 let currentKind: RequestKind = getRequest().kind;
 let currentRequest = getRequest();
 let tabsKey = JSON.stringify(requestTabs(currentKind));
@@ -476,7 +499,13 @@ const requestTabsHandle = createTabs(reqTabsHost, requestTabs(currentKind), firs
 showRequestTab(firstTab(currentKind));
 
 function applyKindLayout(kind: RequestKind): void {
-  const socket = kind !== "http";
+  // Markdown 条目不是请求：请求页签与响应区整块收起，主区只剩全高的
+  // Markdown 编辑器；顶栏保留——里面的 URL/发送换成文档名输入框（urlBar 自管）。
+  const markdown = kind === "markdown";
+  reqTabsHost.hidden = markdown;
+  responsePane.hidden = markdown;
+
+  const socket = !markdown && kind !== "http";
   resTabsHost.hidden = socket;
   resContent.hidden = socket;
   assertPanel.hidden = socket;
@@ -484,13 +513,26 @@ function applyKindLayout(kind: RequestKind): void {
   socketResContent.hidden = !socket;
   responsePane.dataset.kind = kind;
 
+  if (markdown) {
+    // Vditor 工具栏的气泡向上弹出（z-index 很高），会被 #req-panel 的
+    // overflow: auto 沿内边距裁掉；文档模式编辑器高度算死、滚动在编辑器内部，
+    // 面板不需要滚动条，放开裁剪让气泡完整飘到顶栏上方。
+    reqPanel.style.overflow = "visible";
+    markdownEditor.ensure();
+    for (const [key, view] of views) view.hidden = key !== "markdown";
+    return;
+  }
+  if (reqPanel.style.overflow !== "") reqPanel.style.overflow = "";
+
   const defs = requestTabs(kind);
   const key = JSON.stringify(defs);
-  if (key === tabsKey) return;
-  tabsKey = key;
-  requestTabsHandle.setTabs(defs);
-  // 换了类型就从该类型的第一个页签开始（HTTP 仍是 Header）。
-  requestTabsHandle.select(firstTab(kind));
+  if (key !== tabsKey) {
+    tabsKey = key;
+    requestTabsHandle.setTabs(defs);
+    // 换了类型就从该类型的第一个页签开始（HTTP 仍是 Header）。
+    requestTabsHandle.select(firstTab(kind));
+  }
+  // 从 Markdown 切回来时各请求页签处于全 hidden 状态，统一刷回可见性。
   showRequestTab(requestTabsHandle.activeId());
 }
 
@@ -538,10 +580,15 @@ subscribeSocket(() => {
 
 // 拖入 .band 由原生层接管，页面不消费 DOM drop 事件：订阅一次拿绝对路径。
 // 落点落在 form-data 的文件控件上时改为把路径填进那一行，其余情况照旧打开工作区。
-onFileDrop((drop) => {
-  if (dropOntoFormField(drop.x, drop.y, drop.paths)) return;
-  void openDroppedWorkspace(drop.paths);
-});
+// 纯浏览器调试环境没有原生拖放（onFileDrop 会抛），订阅不上不影响其余界面。
+try {
+  onFileDrop((drop) => {
+    if (dropOntoFormField(drop.x, drop.y, drop.paths)) return;
+    void openDroppedWorkspace(drop.paths);
+  });
+} catch {
+  // 非 MyGo 环境：跳过原生拖放订阅。
+}
 
 const settingsDialog = mountSettings();
 
@@ -550,7 +597,15 @@ mountWorkspaceSidebar(sidebar, {
   save: () => void saveWorkspace(false),
   saveAs: () => void saveWorkspace(true),
   newWorkspace: () => guardUnsaved(startNewWorkspace, NEW_WORKSPACE_GUARD),
-  newRequest: (kind) => newRequest(kind),
+  newRequest: (kind) => {
+    // Markdown 文档创建即入册（工作区列表里立即可见、可改名）；
+    // 请求保持原语义：执行后才收进内存工作区。
+    if (kind === "markdown") {
+      newMarkdownDocument();
+      return;
+    }
+    newRequest(kind);
+  },
   load: (id) => loadEntry(id),
   remove: (id) => deleteEntry(id),
   rename: (id, name) => renameEntry(id, name),
@@ -567,6 +622,8 @@ mountWorkspaceSidebar(sidebar, {
 // 组件自己订阅，主文件只负责页签文案——它在这里生成并下发给 createTabs）。
 onLangChange(() => {
   applyStatic();
+  // Markdown 条目没有请求页签，页签文案无需重建。
+  if (currentKind === "markdown") return;
   const defs = requestTabs(currentKind);
   tabsKey = JSON.stringify(defs);
   requestTabsHandle.setTabs(defs);

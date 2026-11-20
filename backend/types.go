@@ -196,7 +196,9 @@ type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID              string             `json:"id"`
 	Name            string             `json:"name"`
-	Kind            string             `json:"kind"` // "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band）
+	Kind            string             `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band）
+	// Markdown 是 kind="markdown" 的文档内容；其余 kind 恒为空串。
+	Markdown string `json:"markdown"`
 	Method          string             `json:"method"`
 	URL             string             `json:"url"`
 	Params          []KeyValue         `json:"params"`

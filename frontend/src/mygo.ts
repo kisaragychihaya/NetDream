@@ -170,8 +170,10 @@ export interface SavedMessage {
 export interface SavedRequest {
   id: string;
   name: string;
-  /** "http" | "websocket" | "tcp" | "socketio"；空 = http（兼容旧 .band） */
+  /** "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band） */
   kind: string;
+  /** Markdown 是 kind="markdown" 的文档内容；其余 kind 恒为空串。 */
+  markdown: string;
   method: string;
   url: string;
   params: KeyValue[];

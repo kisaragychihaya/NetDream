@@ -40,6 +40,8 @@
     "newWebSocket": "WebSocket 接続",
     "newSocketIO": "Socket.IO 接続",
     "newTcp": "TCP 接続",
+    "newMarkdown": "Markdown ファイル",
+    "untitledMarkdown": "無題のドキュメント",
     "addVar": "+ 変数を追加",
     "varsHint": "{{变量名}} は送信前にここの値へ置き換えられます。スクリプトからは nd.vars で読み書きできます。",
     "vars": "変数",
@@ -68,6 +70,7 @@
     "websocketPlaceholder": "ws:// または wss:// で始まるアドレスを入力してください",
     "tcpPlaceholder": "ホスト:ポートを入力してください（例: 127.0.0.1:7000）",
     "socketioPlaceholder": "http://localhost:6021",
+    "markdownPlaceholder": "",
     "send": "送信",
     "sending": "送信中…",
     "receiving": "受信中…",
@@ -292,6 +295,12 @@
     "openInBrowser": "ブラウザーで開く",
     "versionUnknown": "不明",
     "github": "GitHub"
+  },
+  "markdown": {
+    "placeholder": "Markdown を入力（ツールバーで編集モードを切り替えられます）…",
+    "namePlaceholder": "ドキュメント名（空欄は「無題のドキュメント」）",
+    "saveTitle": "このドキュメントを左のワークスペースに保存（.band ファイルには書き込みません）",
+    "saved": "ワークスペースに保存済み"
   },
   "dialog": {
     "unsavedTitle": "ワークスペースに未保存の変更があります",

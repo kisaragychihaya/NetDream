@@ -1,11 +1,22 @@
 import { onLangChange, t } from "../i18n";
 import { getSocketSession, subscribeSocket } from "../socket";
-import { getRequest, getResponse, METHODS, subscribe, updateRequest, type RequestKind } from "../state";
+import {
+  getRequest,
+  getResponse,
+  getWorkspace,
+  METHODS,
+  renameCurrentMarkdown,
+  subscribe,
+  updateRequest,
+  type RequestKind,
+} from "../state";
 
 export interface UrlBarHandlers {
   send: () => void;
   connect: () => void;
   disconnect: () => void;
+  /** Markdown 模式下「发送」按钮槽位变成保存工作区。 */
+  save: () => void;
 }
 
 const URL_PLACEHOLDER_KEYS: Record<RequestKind, string> = {
@@ -13,6 +24,8 @@ const URL_PLACEHOLDER_KEYS: Record<RequestKind, string> = {
   websocket: "urlbar.websocketPlaceholder",
   tcp: "urlbar.tcpPlaceholder",
   socketio: "urlbar.socketioPlaceholder",
+  // Markdown 条目隐藏整个顶栏，占位符不会出现，键只为类型完整。
+  markdown: "urlbar.markdownPlaceholder",
 };
 
 export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => void {
@@ -41,6 +54,15 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
   send.type = "button";
   send.textContent = t("urlbar.send");
 
+  // Markdown 条目的顶栏是文档名：URL/发送对文档没有意义，换成改名输入框。
+  const docName = document.createElement("input");
+  docName.id = "doc-name";
+  docName.type = "text";
+  docName.spellcheck = false;
+  docName.autocomplete = "off";
+  docName.placeholder = t("markdown.namePlaceholder");
+  docName.hidden = true;
+
   const h2c = document.createElement("label");
   h2c.className = "h2c-toggle";
   h2c.title = t("urlbar.h2cTitle");
@@ -52,12 +74,66 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
   h2cLabel.textContent = "h2c";
   h2c.append(h2cBox, h2cLabel);
 
-  host.append(method, url, h2c, send);
+  host.append(method, url, h2c, send, docName);
 
   const socketKind = (): boolean => getRequest().kind !== "http";
 
+  // 「保存」点完闪一下文案：文档收进了工作区，但还没写 .band 文件。
+  let savedFlash = false;
+  let flashTimer: number | undefined;
+
+  const flashSaved = (): void => {
+    savedFlash = true;
+    if (flashTimer !== undefined) window.clearTimeout(flashTimer);
+    flashTimer = window.setTimeout(() => {
+      savedFlash = false;
+      flashTimer = undefined;
+      sync();
+    }, 1500);
+    sync();
+  };
+
+  // 当前条目（Markdown 文档名绑定到工作区条目，请求编辑态里没有名字字段）。
+  const currentName = (): string => {
+    const workspace = getWorkspace();
+    const entry =
+      workspace.currentId === null
+        ? undefined
+        : workspace.entries.find((item) => item.id === workspace.currentId);
+    return entry?.name ?? "";
+  };
+
+  const commitDocName = (): void => {
+    renameCurrentMarkdown(docName.value.trim());
+  };
+
   const sync = (): void => {
     const state = getRequest();
+
+    if (state.kind === "markdown") {
+      // 文档模式：URL/方法收起，「发送」槽位换成保存工作区，旁边是文档名输入框。
+      if (!method.hidden) method.hidden = true;
+      if (!h2c.hidden) h2c.hidden = true;
+      if (!url.hidden) url.hidden = true;
+      if (send.hidden) send.hidden = false;
+      send.disabled = false;
+      send.classList.remove("disconnect");
+      const saveLabel = savedFlash ? t("markdown.saved") : t("common.save");
+      if (send.textContent !== saveLabel) send.textContent = saveLabel;
+      if (send.title !== t("markdown.saveTitle")) send.title = t("markdown.saveTitle");
+      if (docName.hidden) docName.hidden = false;
+      if (docName.placeholder !== t("markdown.namePlaceholder")) {
+        docName.placeholder = t("markdown.namePlaceholder");
+      }
+      const name = currentName();
+      if (docName.value !== name) docName.value = name;
+      return;
+    }
+
+    if (url.hidden) url.hidden = false;
+    if (send.hidden) send.hidden = false;
+    if (!docName.hidden) docName.hidden = true;
+
     const socket = state.kind !== "http";
     if (method.hidden !== socket) method.hidden = socket;
     if (h2c.hidden !== socket) h2c.hidden = socket;
@@ -92,6 +168,11 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
   };
 
   const primary = (): void => {
+    if (getRequest().kind === "markdown") {
+      handlers.save();
+      flashSaved();
+      return;
+    }
     if (!socketKind()) {
       handlers.send();
       return;
@@ -129,6 +210,19 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
 
   send.addEventListener("click", () => primary());
 
+  // 文档名：输入即改名（条目名是唯一真相），回车/失焦时去掉首尾空格。
+  // 文档尚未入册时（重启恢复的空工作区）改名会顺手把它收编进列表。
+  docName.addEventListener("input", () => {
+    renameCurrentMarkdown(docName.value);
+  });
+  docName.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitDocName();
+    docName.blur();
+  });
+  docName.addEventListener("blur", () => commitDocName());
+
   sync();
   const unsubscribe = subscribe(sync);
   const unsubscribeSocket = subscribeSocket(sync);
@@ -136,6 +230,7 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
   const unsubscribeLang = onLangChange(() => sync());
 
   return () => {
+    if (flashTimer !== undefined) window.clearTimeout(flashTimer);
     unsubscribe();
     unsubscribeSocket();
     unsubscribeLang();

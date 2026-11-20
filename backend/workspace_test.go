@@ -225,6 +225,41 @@ func TestWorkspaceFillsFolderRequests(t *testing.T) {
 	}
 }
 
+// Markdown 文档（kind="markdown"）随请求条目一起往返：内容与空名都原样回来；
+// 旧归档没有 markdown 字段时读出来是空串。
+func TestWorkspaceMarkdownRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "docs.band")
+	want := WorkspaceData{
+		Name: "文档工作区",
+		Requests: []SavedRequest{
+			testRequest("r1", "列表接口"),
+			filled(SavedRequest{ID: "m1", Name: "接口说明", Kind: "markdown", Markdown: "# 标题\n\n- a\n- b"}),
+			filled(SavedRequest{ID: "m2", Kind: "markdown"}), // 未命名文档
+		},
+		Vars: map[string]string{},
+	}
+	if err := writeBand(path, want); err != nil {
+		t.Fatalf("writeBand failed: %v", err)
+	}
+	got, err := readBand(path)
+	if err != nil {
+		t.Fatalf("readBand failed: %v", err)
+	}
+	if !reflect.DeepEqual(got.Requests, want.Requests) {
+		t.Fatalf("requests after a round trip = %#v, want %#v", got.Requests, want.Requests)
+	}
+
+	// 旧归档：条目没有 markdown 字段。
+	body := archiveWith(t, `{"version":1,"name":"旧"}`, testRequest("r1", "一"))
+	legacy, err := readBandBytes(body, "legacy.band")
+	if err != nil {
+		t.Fatalf("readBandBytes failed: %v", err)
+	}
+	if legacy.Requests[0].Markdown != "" {
+		t.Fatalf("markdown of a legacy request = %q, want empty", legacy.Requests[0].Markdown)
+	}
+}
+
 func readFileBytes(t *testing.T, path string) []byte {
 	t.Helper()
 	body, err := os.ReadFile(path)

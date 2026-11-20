@@ -40,6 +40,8 @@
     "newWebSocket": "WebSocket 连接",
     "newSocketIO": "Socket.IO 连接",
     "newTcp": "TCP 连接",
+    "newMarkdown": "Markdown 文件",
+    "untitledMarkdown": "未命名文档",
     "addVar": "+ 添加变量",
     "varsHint": "{{变量名}} 在发送前替换为这里的值，脚本可用 nd.vars 读写。",
     "vars": "变量",
@@ -68,6 +70,7 @@
     "websocketPlaceholder": "请输入以 ws:// 或 wss:// 开头的地址",
     "tcpPlaceholder": "请输入主机:端口，如 127.0.0.1:7000",
     "socketioPlaceholder": "http://localhost:6021",
+    "markdownPlaceholder": "",
     "send": "发送",
     "sending": "发送中…",
     "receiving": "接收中…",
@@ -292,6 +295,12 @@
     "openInBrowser": "在浏览器中打开",
     "versionUnknown": "未知",
     "github": "GitHub"
+  },
+  "markdown": {
+    "placeholder": "输入 Markdown 内容，工具栏可切换编辑模式…",
+    "namePlaceholder": "文档名称（留空显示「未命名文档」）",
+    "saveTitle": "把当前文档存入左侧工作区（不写入 .band 文件）",
+    "saved": "已存入工作区"
   },
   "dialog": {
     "unsavedTitle": "工作区有未保存的更改",

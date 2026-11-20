@@ -40,6 +40,8 @@
     "newWebSocket": "WebSocket Connection",
     "newSocketIO": "Socket.IO Connection",
     "newTcp": "TCP Connection",
+    "newMarkdown": "Markdown File",
+    "untitledMarkdown": "Untitled Document",
     "addVar": "+ Add variable",
     "varsHint": "{{变量名}} is replaced with these values before sending; scripts can read and write them through nd.vars.",
     "vars": "Variables",
@@ -68,6 +70,7 @@
     "websocketPlaceholder": "Enter an address starting with ws:// or wss://",
     "tcpPlaceholder": "Enter host:port, e.g. 127.0.0.1:7000",
     "socketioPlaceholder": "http://localhost:6021",
+    "markdownPlaceholder": "",
     "send": "Send",
     "sending": "Sending…",
     "receiving": "Receiving…",
@@ -292,6 +295,12 @@
     "openInBrowser": "Open in browser",
     "versionUnknown": "Unknown",
     "github": "GitHub"
+  },
+  "markdown": {
+    "placeholder": "Enter Markdown content; the toolbar can switch edit modes...",
+    "namePlaceholder": "Document name (empty shows \"Untitled Document\")",
+    "saveTitle": "Save this document into the workspace on the left (does not write the .band file)",
+    "saved": "Saved to workspace"
   },
   "dialog": {
     "unsavedTitle": "Workspace has unsaved changes",

@@ -565,6 +565,14 @@ button:disabled {
   font-size: 12.5px;
 }
 
+/* 文档名输入框：Markdown 模式下顶替 URL 栏，更像标题而不是地址 */
+#doc-name {
+  flex: 1;
+  height: 32px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
 #send {
   min-width: 78px;
   height: 32px;
@@ -1678,6 +1686,10 @@ button:disabled {
   color: #d97706;
 }
 
+.m-md {
+  color: #2563eb;
+}
+
 @media (prefers-color-scheme: dark) {
   :root[data-theme="auto"] .m-ws {
     color: #4ade80;
@@ -1689,6 +1701,10 @@ button:disabled {
 
   :root[data-theme="auto"] .m-sio {
     color: #fbbf24;
+  }
+
+  :root[data-theme="auto"] .m-md {
+    color: #60a5fa;
   }
 }
 
@@ -1702,6 +1718,10 @@ button:disabled {
 
 :root[data-theme="dark"] .m-sio {
   color: #fbbf24;
+}
+
+:root[data-theme="dark"] .m-md {
+  color: #60a5fa;
 }
 
 /* ---- Socket 响应区 ---- */
@@ -1732,7 +1752,14 @@ button:disabled {
 #socket-res-tabs[hidden],
 #socket-res-content[hidden],
 #method[hidden],
-.h2c-toggle[hidden] {
+.h2c-toggle[hidden],
+/* hidden 是布局开关（markdown 模式整块收起），display 不能把它盖掉 */
+#topbar[hidden],
+#req-tabs[hidden],
+#response-pane[hidden],
+#doc-name[hidden],
+#url[hidden],
+#send[hidden] {
   display: none;
 }
 
@@ -2133,6 +2160,25 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+}
+
+/* ---- Markdown 文档编辑器 ---- */
+
+/* Markdown 视图独占主区：撑满 #req-panel（其余视图 natural-height + 面板滚动，
+   这里高度算死，滚动交给 Vditor 内部，免得出现面板和编辑区双滚动条）。 */
+.req-view[data-view="markdown"] {
+  height: 100%;
+  min-height: 0;
+}
+
+.md-editor {
+  height: 100%;
+  min-height: 240px;
+}
+
+.md-editor .vditor {
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 /* ---- 控制台（脚本日志） ---- */
