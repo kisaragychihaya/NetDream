@@ -21,11 +21,11 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **Assertions panel**: status code, contains / not-contains, response time
 - **Pre / post scripts**: executed by a goja engine — pre scripts can rewrite the request, post scripts can assert on the response, both can read/write variables; console output lands in the "Console" tab, assertions in the assertions panel
 - **Variables**: editable in the sidebar; `{{name}}` placeholders in URL / headers / body are substituted before sending, and scripts share the same store via `nd.vars`
-- **Markdown documents**: created from the sidebar "New" menu and registered immediately, edited with Vditor in instant-rendering mode (Typora-style; split view and WYSIWYG also available); the title is edited right in the top bar; content persists as a `.band` entry, and the top-bar "Save" tucks it into the workspace
+- **Markdown documents**: created from the sidebar "New" menu and registered immediately, edited with Vditor in Typora-style instant rendering; the title is edited right in the top bar; content persists as a `.band` entry, fully offline
 - **Request grouping**: nested folders in the sidebar, drag to organize, deleting a folder promotes its contents one level, collapse state remembered (not persisted)
 - **Interface**: 中文 / English / 日本語 with a follow-system option; light / dark / follow-system theme; settings page with about & version info
-- **System proxy**: HTTP/SSE and WS/Socket.IO handshakes honor env vars → system proxy (bypass supports wildcards / CIDR / `<local>`); TCP connects directly
-- **Workspaces (.band)**: a zip archive — `workspace.json` (name + request-tree folders), `requests/` with one file per request, `engine/vars.json` for variables; open / save / save-as; drop a `.band` file on the window to open it (dropping onto a form-data file field fills that row instead); executing a request registers it in the in-memory workspace automatically (success or failure), editing method / URL and re-executing forks a new entry, custom names stick; unsaved-changes guard before closing / new / open
+- **System proxy**: HTTP/SSE and WS/Socket.IO honor env vars → system proxy, bypass configurable; TCP connects directly
+- **Workspaces (.band)**: open / save / save-as; drop a `.band` file on the window to open it (dropping onto a form-data file field fills that row instead); executing a request registers it in the in-memory workspace automatically (success or failure), editing method / URL and re-executing forks a new entry, custom names stick; unsaved-changes guard before closing / new / open. Archive format details: [docs/architecture.md](docs/architecture.md)
 - **Auto-save**: registering on connect, refreshed on disconnect; saving writes the whole in-memory workspace to disk
 
 ## Scripts (pre / post)
