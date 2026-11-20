@@ -28,6 +28,8 @@ const (
 type bandMeta struct {
 	Version int    `json:"version"`
 	Name    string `json:"name"`
+	// Folders 是请求树的分组；旧归档没有这个字段，读出来是 nil（= 全部请求在根）。
+	Folders []SavedFolder `json:"folders"`
 }
 
 // WorkspaceService reads and writes the .band workspaces the page keeps.
@@ -182,7 +184,80 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 	if vars == nil {
 		vars = map[string]string{} // the page reads a map where it expects one and never null
 	}
-	return WorkspaceData{Name: meta.Name, Requests: requests, Vars: vars}, nil
+	return WorkspaceData{
+		Name:     meta.Name,
+		Requests: requests,
+		Vars:     vars,
+		Folders:  normalizeFolders(meta.Folders, requests),
+	}, nil
+}
+
+// normalizeFolders 把 workspace.json 的 folders 整理成页面可以直接信任的树：
+// 字段缺失 → 空切片；每个文件夹的 requests 缺失 → 空切片；指向不存在请求的 ID
+// 剔除（同一请求出现在多个文件夹时只有第一次出现生效）；parentId 指向不存在的
+// 文件夹、或父子成环的文件夹提到根目录。坏数据的文件夹宁可丢，也不让页面树
+// 画不出来或渲染空行。
+func normalizeFolders(folders []SavedFolder, requests []SavedRequest) []SavedFolder {
+	if len(folders) == 0 {
+		return []SavedFolder{}
+	}
+
+	known := make(map[string]bool, len(requests))
+	for _, req := range requests {
+		known[req.ID] = true
+	}
+
+	kept := make([]SavedFolder, 0, len(folders))
+	placed := make(map[string]bool, len(folders)) // 已经归属到某个文件夹的请求
+	ids := make(map[string]bool, len(folders))    // 已收下的文件夹 id
+	for _, folder := range folders {
+		// 空 id 或重复 id 的文件夹引用不出唯一的节点，直接丢。
+		if folder.ID == "" || ids[folder.ID] {
+			continue
+		}
+		ids[folder.ID] = true
+		kept = append(kept, SavedFolder{
+			ID:       folder.ID,
+			Name:     folder.Name,
+			ParentID: folder.ParentID,
+			Requests: normalizeFolderRequests(folder.Requests, known, placed),
+		})
+	}
+
+	parents := make(map[string]string, len(kept))
+	for i := range kept {
+		// 悬空的 parentId：提回根目录，否则整个子树在页面里没有落脚点。
+		if kept[i].ParentID != "" && !ids[kept[i].ParentID] {
+			kept[i].ParentID = ""
+		}
+		parents[kept[i].ID] = kept[i].ParentID
+	}
+	// 成环的父子链（A 的父是 B、B 的父是 A）从根走不到，把环上每个成员都提回根。
+	for i := range kept {
+		seen := make(map[string]bool, len(kept))
+		for parent := kept[i].ParentID; parent != ""; parent = parents[parent] {
+			if parent == kept[i].ID || seen[parent] {
+				kept[i].ParentID = ""
+				break
+			}
+			seen[parent] = true
+		}
+	}
+	return kept
+}
+
+// normalizeFolderRequests 留下文件夹里真实存在、且还没被别的文件夹领走的请求 ID，
+// 保持原有顺序。
+func normalizeFolderRequests(ids []string, known, placed map[string]bool) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !known[id] || placed[id] {
+			continue
+		}
+		placed[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // writeBand writes data to path as a .band archive, replacing what is there
@@ -191,7 +266,13 @@ func writeBand(path string, data WorkspaceData) error {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
-	meta, err := json.MarshalIndent(bandMeta{Version: bandVersion, Name: data.Name}, "", "  ")
+	// folders 总是写（空也写）：旧归档里留着上一份树的话，页面清空分组后
+	// 那些文件夹会再冒出来。
+	folders := data.Folders
+	if folders == nil {
+		folders = []SavedFolder{}
+	}
+	meta, err := json.MarshalIndent(bandMeta{Version: bandVersion, Name: data.Name, Folders: folders}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding the workspace failed: %w", err)
 	}

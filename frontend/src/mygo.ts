@@ -146,6 +146,17 @@ export interface SavedAssertion {
   value: string;
 }
 
+/**
+ * SavedFolder 是工作区请求树里的一个文件夹；parentId 空 = 根目录。
+ * requests 按显示顺序存请求 ID；不在任何文件夹的请求平铺在根目录。
+ */
+export interface SavedFolder {
+  id: string;
+  name: string;
+  parentId: string;
+  requests: string[];
+}
+
 export interface SavedMessage {
   id: string;
   name: string;
@@ -285,6 +296,8 @@ export interface WorkspaceData {
   requests: SavedRequest[];
   /** 脚本变量；读写为 zip 内独立 vars.json */
   vars: Record<string, string>;
+  /** 请求树的分组；nil 落盘补 []（生成 TS 类型要求） */
+  folders: SavedFolder[];
 }
 
 export interface WorkspaceFile {

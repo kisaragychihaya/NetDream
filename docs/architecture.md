@@ -9,12 +9,13 @@
 backend/
   main.go              # main()：Bind + 窗口（窗口常量）+ OnFileDrop 激活（拖入文件拿路径）+ guardWindow
   close.go             # 窗口关闭守卫：OnClose 否决 + workspace:closeRequested 事件 + SetDirty/CloseWindow 支撑
-  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedSocketEvent、SavedRequest、WorkspaceData、WorkspaceFile
+  types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedSocketEvent、SavedRequest、SavedFolder、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send（脚本编排）、PickFile（仅有的两个导出方法）+ APIRequest↔protocol.HTTPRequest / APIResponse↔protocol.HTTPResponse 的机械映射
   socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
   ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
-  workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写
+  workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写 + 请求树归一化
+  workspace_test.go    # .band 往返、旧格式兼容、folders 归一化（readBandBytes/writeBand）
   protocol/            # 网络协议实现（package protocol，不 import main；契约类型由 main 映射进来）
     types.go           # 自有的协议类型：KeyValue、FormField、AuthInfo、HTTPRequest/HTTPResponse、ResponseCookie、SSEOpen/SSEEvent/SSEMessage、Emit、ConnectParams、SendParams、SocketEvent、Sink
     http.go            # Do：URL/Body 构造、头与 Cookie、认证、超时、h2c、响应整形与截断（代理见 proxy*.go）
@@ -389,13 +390,31 @@ Version="3" 时的 Socket.IO v2 / Engine.IO v3）；**不实现 long-polling，�
 `.band` 文件 = zip 压缩包（`archive/zip`），内部结构：
 
 ```
-workspace.json          # {"version": 1, "name": "工作区名"}
+workspace.json          # {"version": 1, "name": "工作区名", "folders": [...]}
 engine/vars.json        # 脚本变量（Record<string,string>）；缺失/解析失败 = 空
 requests/<id>.json      # 每个已保存请求一个文件，JSON（SavedRequest，缩进格式）
 ```
 
 `workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 与
 `engine/vars.json` 解析失败的条目跳过（vars 失败 = 空变量表，不报错）。
+
+**请求分组（请求树）**：`folders` 是 `SavedFolder[]`，`[{id, name, parentId, requests}]`——
+`parentId` 空串 = 根目录，`requests` 按显示顺序存请求 ID。层级只存在这一个字段里
+（`requests/*.json` 不带归属信息），所以换工具打开时请求本身不受影响。
+
+- **根目录平铺**：不在任何 `folders[].requests` 里的请求平铺在根目录。归属是
+  「文件夹 → 请求 ID」单向引用，一个请求最多属于一个文件夹。
+- **字段缺失 = 空结构**：旧 .band 的 `workspace.json` 没有 `folders` → 读出空数组，
+  所有请求在根目录；落盘时**总是**写 `folders`（空也写 `[]`），否则旧归档里的树
+  会留在原地。`WorkspaceData.folders` 的 nil 同样按 `[]` 处理（同 `filled` 的惯例）。
+- **读侧归一化**（`normalizeFolders`，写读都经它，页面可直接信任）：
+  - 文件夹的 `requests` 缺失 → `[]`；指向不存在的请求 ID 剔除；
+  - 同一请求 ID 出现在多个文件夹 → 只有第一次出现生效，后面的剔除；
+  - `parentId` 指向不存在的文件夹 → 提到根目录（`parentId` 置 `""`）；
+  - 空 id / 重复 id 的文件夹丢弃（引用不出唯一节点）；
+  - 父子成环（A 的父是 B、B 的父是 A）→ 环上每个成员都提到根目录，
+    否则从根走不到、整棵子树在页面上画不出来。
+- 写读顺序都保持：`folders` 数组顺序即同级顺序，`requests` 数组顺序即文件夹内顺序。
 
 绑定 `WorkspaceService`（注意导出方法仅限这六个）：
 
@@ -475,6 +494,16 @@ type WorkspaceData struct {
 	Name     string            `json:"name"`
 	Requests []SavedRequest    `json:"requests"`
 	Vars     map[string]string `json:"vars"` // 脚本变量；读写为 zip 内 engine/vars.json
+	Folders  []SavedFolder     `json:"folders"` // 请求树的分组；读写为 zip 内 workspace.json，nil 落盘补 []
+}
+
+// SavedFolder 是工作区请求树里的一个文件夹；parentId 空 = 根目录。
+// requests 按显示顺序存请求 ID；不在任何文件夹的请求平铺在根目录。
+type SavedFolder struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	ParentID string   `json:"parentId"`
+	Requests []string `json:"requests"`
 }
 
 type WorkspaceFile struct {
@@ -534,7 +563,8 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
   无脚本时后端原样返回故为空操作）。
 - 工作区脏跟踪：`isWorkspaceDirty()` / `setWorkspaceDirty(dirty)`（置位时同步推送
   `WorkspaceService.setDirty`，驱动窗口关闭守卫）。置脏：`upsertEntry`、`deleteEntry`、
-  `renameEntry`、`renameWorkspace`、`setVars`（内容真变时）；清脏：`loadWorkspace`、
+  `renameEntry`、`renameWorkspace`、`setVars`（内容真变时）、`addFolder`、`renameFolder`、
+  `deleteFolder`、`moveRequest`（请求树同样随 .band 落盘）；清脏：`loadWorkspace`、
   `newWorkspace`、保存成功。`loadEntry` 与编辑器字段编辑不置脏。
 - `ResponseState` 追加脚本产物（不持久化）：`scriptLogs/scriptTests/preScriptError/postScriptError`。
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
@@ -633,10 +663,21 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 
 - `WorkspaceState`（state.ts，**不**进 localStorage 编辑器存档）：
   `name: string`、`path: string | null`、`entries: SavedRequest[]`（生成类型）、
+  `folders: SavedFolder[]`（请求树的分组，生成类型）、
   `currentId: string | null`（编辑器当前对应的条目 id；null = 未保存的新请求）。
-- 动作：`loadWorkspace(file: WorkspaceFile)`（整体载入——含 vars 整体替换，并加载
-  第一条请求进编辑器）、`newWorkspace()`（重置为空工作区「未命名工作区」：path=null、
-  entries=[]、currentId=null、变量清空、编辑器重置为空 HTTP 请求、清脏）、
+- 请求分组（folders）：归属只存在 `folders[].requests` 里（文件夹 → 请求 ID），
+  没被任何文件夹引用的请求平铺在根目录；`parentId` 空串 = 根。
+  归一化（孤儿请求、重复归属、悬空 parentId、环）由 Go 侧读取 .band 时做完，
+  前端直接信任；`loadWorkspace` 整块替换、`newWorkspace` 清空。
+  动作（都置脏）：`addFolder(parentId: string | null)`（追加到同级末尾，名字留空
+  由界面进改名态）、`renameFolder(id, name)`、`deleteFolder(id)`（**内容上移一级**：
+  请求并进父文件夹、父是根就回根平铺；子文件夹 re-parent 到它的父级）、
+  `moveRequest(requestId, folderId: string | null)`（从原文件夹摘掉、追加到目标
+  末尾；null = 移回根目录）。`deleteEntry` 同步把该请求从所有 `folders[].requests`
+  剔除；`upsertEntry` 不动 folders，已有请求的归属因此保持不变。
+- 动作：`loadWorkspace(file: WorkspaceFile)`（整体载入——含 vars 整体替换、folders
+  整块替换，并加载第一条请求进编辑器）、`newWorkspace()`（重置为空工作区「未命名工作区」：
+  path=null、entries=[]、folders=[]、currentId=null、变量清空、编辑器重置为空 HTTP 请求、清脏）、
   `newRequest(kind)`（按类型重置编辑器、currentId=null）、`loadEntry(id)`、
   `deleteEntry(id)`（删的是当前条目则 currentId=null）、`renameEntry(id, name)`、
   `renameWorkspace(name)`、`snapshotCurrent(): SavedRequest`（编辑器 → 快照；命名规则
@@ -653,7 +694,7 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   HTTP 比较 method+URL、WS/TCP/Socket.IO 比较 URL——与已入册条目不一致即视为新请求，
   执行后派生新条目，原条目原样保留**；未变的编辑按 id 原地刷新，**改过名的条目保留别名**。
 - 保存流程（main.ts）：内存即真相——「保存」把 `WorkspaceState` 整块
-  `{name, entries}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
+  `{name, entries, folders}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
   无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示；
   成功（save/saveAs 两条）清脏。`saveWorkspace` 返回 boolean 供关闭/新建守卫判断
   「真的保存成功」（saveAs 对话框取消 = false）。
@@ -668,12 +709,25 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   `<div id="main-area">`（**原有 id 一律不动**，组件无感）。
   侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存 / 新建」
   （两字一组，title 给全名；「新建」= 新建工作区，脏时先过未保存守卫）；
-  「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接，选中调
-  `newRequest(kind)`）；可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
+  「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接 / Socket.IO 连接，
+  末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` / `addFolder(null)`）；
+  可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
   脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
   WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。
+- 请求树（同一组件）：列表是树——文件夹行（折叠箭头 + 名称 + hover 时的
+  「＋ 新建子文件夹」「× 删除文件夹」）+ 缩进的内容容器；同一级「文件夹在前、
+  请求在后」，同级顺序 = `folders` 数组顺序，缩进靠行上的 `--ws-depth`。
+  文件夹内容可多级嵌套；**折叠状态是组件内 `Set`，不落盘**（`hidden` 切内容容器，
+  不重画树；重画后仍保留，换工作区时剪掉已不存在的文件夹 id）。双击文件夹名
+  行内改名（同请求行）；新建文件夹后直接进改名态，取消则保留「未命名文件夹」。
+  删除文件夹要 confirm（文案说明内容上移一级）。
+- 拖拽移动：请求行 `draggable`（dragstart 记下请求 id，dragover 读不到 payload 所以
+  存在组件状态里）；文件夹行是 drop 落点（dragover preventDefault + `.drag-over`
+  高亮，drop 调 `moveRequest(id, folderId)`）；列表根部（空白处或**根目录的请求行**）
+  也是落点，调 `moveRequest(id, null)`——文件夹内部的请求行不当作根落点，避免在
+  文件夹里拖动时被误判成移回根目录。页面内拖拽不触发 `.band` 拖入的 `ws-drop` 虚线框。
 - 拖入打开：`.band` 文件拖到**窗口任意位置**即可打开。机制是 mygo 原生文件
   拖放而非 webview 的 File API：`main.go` 在窗口上注册 `Window.OnFileDrop`
   监听器激活路径投递（至少要有一个 Go 侧监听器，原生层才会接受未被页面消费的

@@ -6,6 +6,7 @@ import type {
   APIResponse,
   FormField,
   KeyValue,
+  SavedFolder,
   SavedMessage,
   SavedRequest,
   SavedSocketEvent,
@@ -120,6 +121,8 @@ export interface WorkspaceState {
   name: string;
   path: string | null;
   entries: SavedRequest[];
+  /** 请求树的文件夹；没有归属的请求平铺在根目录（folders 里查不到它的 id）。 */
+  folders: SavedFolder[];
   currentId: string | null;
 }
 
@@ -599,6 +602,7 @@ const workspace: WorkspaceState = {
   name: "",
   path: null,
   entries: [],
+  folders: [],
   currentId: null,
 };
 
@@ -667,6 +671,8 @@ export function loadWorkspace(file: WorkspaceFile): void {
   workspace.name = text(file.data.name);
   workspace.path = text(file.path) || null;
   workspace.entries = file.data.requests;
+  // 请求树的归一化（孤儿请求、悬空 parentId、环）Go 侧读取时就做完了，这里直接信。
+  workspace.folders = file.data.folders;
   // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
   replaceVars(hydrateVars(file.data.vars));
   const first = workspace.entries[0];
@@ -687,6 +693,7 @@ export function newWorkspace(): void {
   workspace.name = "";
   workspace.path = null;
   workspace.entries = [];
+  workspace.folders = [];
   workspace.currentId = null;
   // 变量跟着工作区走，新工作区从空变量开始；走不置脏的安静路径。
   replaceVars({});
@@ -712,6 +719,10 @@ export function deleteEntry(id: string): void {
   const next = workspace.entries.filter((item) => item.id !== id);
   if (next.length === workspace.entries.length) return;
   workspace.entries = next;
+  // 请求没了，文件夹里的引用也要清掉；否则这里留的 id 在树上是一条空行。
+  for (const folder of workspace.folders) {
+    if (folder.requests.includes(id)) folder.requests = folder.requests.filter((item) => item !== id);
+  }
   if (workspace.currentId === id) workspace.currentId = null;
   setWorkspaceDirty(true);
   notify();
@@ -743,6 +754,66 @@ export function upsertEntry(entry: SavedRequest): void {
   if (index < 0) workspace.entries = [...workspace.entries, entry];
   else workspace.entries[index] = entry;
   workspace.currentId = entry.id;
+  setWorkspaceDirty(true);
+  notify();
+}
+
+/* ---- 请求分组（工作区的一部分，随 .band 落盘） ---- */
+
+// 文件夹只在内存里改：树本身随 .band 保存，和 vars 一样「改了就置脏」。
+// 顺序即显示顺序——folders 数组里同 parentId 的先后决定同级次序。
+
+/** 新建文件夹，追加到同级末尾；parentId 为 null = 根目录。名字留空等界面改名。 */
+export function addFolder(parentId: string | null): void {
+  const parent = parentId === null ? null : workspace.folders.find((item) => item.id === parentId);
+  if (parentId !== null && parent === undefined) return;
+  workspace.folders = [
+    ...workspace.folders,
+    { id: newId(), name: "", parentId: parent?.id ?? "", requests: [] },
+  ];
+  setWorkspaceDirty(true);
+  notify();
+}
+
+export function renameFolder(id: string, name: string): void {
+  const folder = workspace.folders.find((item) => item.id === id);
+  if (folder === undefined || folder.name === name) return;
+  folder.name = name;
+  setWorkspaceDirty(true);
+  notify();
+}
+
+// 删文件夹不删内容：里面的请求上移一级（父是根就回根平铺），子文件夹改挂到
+// 它的父级，然后把这一层摘掉——用户点的是「去掉这层分组」，不是「删掉这些请求」。
+export function deleteFolder(id: string): void {
+  const folder = workspace.folders.find((item) => item.id === id);
+  if (folder === undefined) return;
+  const parent = workspace.folders.find((item) => item.id === folder.parentId);
+  if (parent !== undefined) parent.requests = [...parent.requests, ...folder.requests];
+  for (const child of workspace.folders) {
+    if (child.parentId === id) child.parentId = parent?.id ?? "";
+  }
+  workspace.folders = workspace.folders.filter((item) => item.id !== id);
+  setWorkspaceDirty(true);
+  notify();
+}
+
+/** 把请求移动到某个文件夹末尾；folderId 为 null = 移回根目录（从所在文件夹摘掉即可）。 */
+export function moveRequest(requestId: string, folderId: string | null): void {
+  if (!workspace.entries.some((entry) => entry.id === requestId)) return;
+  const target = folderId === null ? undefined : workspace.folders.find((item) => item.id === folderId);
+  if (folderId !== null && target === undefined) return;
+  let changed = false;
+  for (const folder of workspace.folders) {
+    if (!folder.requests.includes(requestId)) continue;
+    folder.requests = folder.requests.filter((item) => item !== requestId);
+    changed = true;
+  }
+  if (target !== undefined) {
+    target.requests = [...target.requests, requestId];
+    changed = true;
+  }
+  if (!changed) return;
   setWorkspaceDirty(true);
   notify();
 }

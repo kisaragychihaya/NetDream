@@ -25,8 +25,10 @@ import {
   subscribeSocket,
 } from "./socket";
 import {
+  addFolder,
   buildRequest,
   deleteEntry,
+  deleteFolder,
   emptyRow,
   getRequest,
   getResponse,
@@ -36,10 +38,12 @@ import {
   loadEntry,
   loadSavedRequest,
   loadWorkspace,
+  moveRequest,
   newRequest,
   newWorkspace,
   pushStreamEvent,
   renameEntry,
+  renameFolder,
   renameWorkspace,
   setFormFilePath,
   setStreamChannel,
@@ -250,7 +254,7 @@ function clearWorkspaceError(): void {
 
 function workspaceData(): WorkspaceData {
   const state = getWorkspace();
-  return { name: state.name, requests: state.entries, vars: getVars() };
+  return { name: state.name, requests: state.entries, vars: getVars(), folders: state.folders };
 }
 
 // 三键确认框是单例：对话框已经打开时，任何守卫的新触发都被忽略。
@@ -550,6 +554,10 @@ mountWorkspaceSidebar(sidebar, {
   load: (id) => loadEntry(id),
   remove: (id) => deleteEntry(id),
   rename: (id, name) => renameEntry(id, name),
+  addFolder: (parentId) => addFolder(parentId),
+  removeFolder: (id) => deleteFolder(id),
+  renameFolder: (id, name) => renameFolder(id, name),
+  moveRequest: (requestId, folderId) => moveRequest(requestId, folderId),
   renameWorkspace: (name) => renameWorkspace(name),
   openSettings: () => settingsDialog.open(),
 });

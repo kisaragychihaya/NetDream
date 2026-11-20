@@ -55,6 +55,11 @@
     "empty": "Open a .band workspace, or click \"+ New Request\" to start",
     "deleteRequest": "Delete request",
     "deleteConfirm": "Delete request \"{{name}}\"?",
+    "newFolder": "New folder",
+    "newSubfolder": "New subfolder",
+    "deleteFolder": "Delete folder",
+    "deleteFolderConfirm": "Delete folder \"{{name}}\"? Its requests and subfolders move up one level.",
+    "untitledFolder": "Untitled folder",
     "droppedNotBand": "The dropped file is not a .band workspace"
   },
   "urlbar": {

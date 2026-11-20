@@ -55,6 +55,11 @@
     "empty": "打开 .band 工作区，或点「＋ 新建请求」开始",
     "deleteRequest": "删除请求",
     "deleteConfirm": "删除请求“{{name}}”？",
+    "newFolder": "新建文件夹",
+    "newSubfolder": "新建子文件夹",
+    "deleteFolder": "删除文件夹",
+    "deleteFolderConfirm": "删除文件夹“{{name}}”？里面的请求和子文件夹会上移一级。",
+    "untitledFolder": "未命名文件夹",
     "droppedNotBand": "拖入的不是 .band 工作区文件"
   },
   "urlbar": {

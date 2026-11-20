@@ -221,10 +221,20 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	SocketIOPath    string             `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
 }
 
+// SavedFolder 是工作区请求树里的一个文件夹；parentId 空 = 根目录。
+// requests 按显示顺序存请求 ID；不在任何文件夹的请求平铺在根目录。
+type SavedFolder struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	ParentID string   `json:"parentId"`
+	Requests []string `json:"requests"`
+}
+
 type WorkspaceData struct {
 	Name     string            `json:"name"`
 	Requests []SavedRequest    `json:"requests"`
-	Vars     map[string]string `json:"vars"` // 脚本变量；读写为 zip 内独立 vars.json
+	Vars     map[string]string `json:"vars"`    // 脚本变量；读写为 zip 内独立 vars.json
+	Folders  []SavedFolder     `json:"folders"` // 请求树的分组；nil 落盘补 []（生成 TS 类型要求）
 }
 
 type WorkspaceFile struct {

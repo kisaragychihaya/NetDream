@@ -11,7 +11,7 @@ import {
   type Method,
   type RequestKind,
 } from "../state";
-import type { SavedRequest } from "../mygo";
+import type { SavedFolder, SavedRequest } from "../mygo";
 import { mountKVTable } from "./kvTable";
 
 export interface WorkspaceHandlers {
@@ -24,6 +24,12 @@ export interface WorkspaceHandlers {
   load: (id: string) => void;
   remove: (id: string) => void;
   rename: (id: string, name: string) => void;
+  /** 新建文件夹；parentId 为 null = 根目录。 */
+  addFolder: (parentId: string | null) => void;
+  removeFolder: (id: string) => void;
+  renameFolder: (id: string, name: string) => void;
+  /** 把请求移动到文件夹末尾；folderId 为 null = 移回根目录。 */
+  moveRequest: (requestId: string, folderId: string | null) => void;
   renameWorkspace: (name: string) => void;
   /** 打开设置页（左下角齿轮）。 */
   openSettings: () => void;
@@ -40,6 +46,7 @@ const METHOD_CLASSES: Record<Method, string> = {
 };
 
 const UNTITLED_REQUEST = "sidebar.untitledRequest";
+const UNTITLED_FOLDER = "sidebar.untitledFolder";
 
 const NEW_OPTIONS: { kind: RequestKind; labelKey: string }[] = [
   { kind: "http", labelKey: "sidebar.newHttp" },
@@ -64,12 +71,31 @@ function displayOf(entry: SavedRequest): string {
   return entry.name.trim() === "" ? t(UNTITLED_REQUEST) : entry.name;
 }
 
+function displayFolder(folder: SavedFolder): string {
+  return folder.name.trim() === "" ? t(UNTITLED_FOLDER) : folder.name;
+}
+
 export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHandlers): () => void {
   host.textContent = "";
 
+  let editing = false;
+  let lastStructure = "";
+  let lastCurrent: string | null = null;
+  let menuRoot: HTMLElement | null = null;
+  let varsCollapsed = false;
+  let disposeVars: (() => void) | null = null;
+  // 正在被拖动的请求 id：HTML5 DnD 在 dragover 里读不到 payload，只能自己记。
+  let dragging: string | null = null;
+  // 折叠状态是组件内的：只活到这次会话，不随工作区落盘。
+  const collapsed = new Set<string>();
+  // 行 -> 内容容器，折叠时直接改 hidden，不重画整棵树（免得丢滚动位置）。
+  const folderBodies = new Map<string, { body: HTMLElement; toggle: HTMLElement }>();
+
   // 拖入 .band 由 mygo 原生拖放拿路径（main.ts 订阅 onFileDrop），这里只把
-  // 虚线框高亮当作视觉反馈，不再消费 drop 事件。
+  // 虚线框高亮当作视觉反馈，不再消费 drop 事件。拖动列表里的请求行是页面内的
+  // 拖放，不走原生层，别把它也画成「要打开文件」。
   const highlight = (event: DragEvent): void => {
+    if (dragging !== null) return;
     event.preventDefault();
     host.classList.add("ws-drop");
   };
@@ -80,13 +106,6 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     host.classList.remove("ws-drop");
   });
   host.addEventListener("drop", () => host.classList.remove("ws-drop"));
-
-  let editing = false;
-  let lastStructure = "";
-  let lastCurrent: string | null = null;
-  let menuRoot: HTMLElement | null = null;
-  let varsCollapsed = false;
-  let disposeVars: (() => void) | null = null;
 
   const rowsFromVars = (source: Record<string, string>): KVRow[] =>
     Object.entries(source).map(([key, value]) => ({
@@ -205,11 +224,34 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
   const structure = (): string => {
     const state = getWorkspace();
-    return JSON.stringify([state.path, state.entries.map((entry) => [entry.id, entry.kind, entry.method])]);
+    return JSON.stringify([
+      state.path,
+      state.entries.map((entry) => [entry.id, entry.kind, entry.method]),
+      // 树本身：文件夹的归属与顺序变了就要重画（名字不进来，行内改名不重画）。
+      state.folders.map((folder) => [folder.id, folder.parentId, folder.requests]),
+    ]);
   };
 
   const liveEntry = (id: string): SavedRequest | undefined =>
     getWorkspace().entries.find((entry) => entry.id === id);
+
+  const liveFolder = (id: string): SavedFolder | undefined =>
+    getWorkspace().folders.find((folder) => folder.id === id);
+
+  // 同级顺序 = folders 数组里的先后（后端保证 parentId 都有落脚点）。
+  const childrenOf = (parentId: string): SavedFolder[] =>
+    getWorkspace().folders.filter((folder) => folder.parentId === parentId);
+
+  const toggleFolder = (id: string): void => {
+    if (collapsed.has(id)) collapsed.delete(id);
+    else collapsed.add(id);
+    const node = folderBodies.get(id);
+    if (node === undefined) return;
+    const folded = collapsed.has(id);
+    node.body.hidden = folded;
+    node.toggle.textContent = folded ? "▸" : "▾";
+    node.toggle.setAttribute("aria-expanded", folded ? "false" : "true");
+  };
 
   const beginRename = (anchor: HTMLElement, value: string, apply: (name: string) => void): void => {
     if (editing) return;
@@ -251,14 +293,29 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     input.addEventListener("blur", () => finish(true));
   };
 
-  const entryRow = (entry: SavedRequest, currentId: string | null): HTMLElement => {
+  const entryRow = (entry: SavedRequest, currentId: string | null, depth: number): HTMLElement => {
     const row = document.createElement("div");
     row.className = entry.id === currentId ? "ws-entry active" : "ws-entry";
     row.dataset.id = entry.id;
+    // 缩进与「是不是根目录的落点」都看这一层：0 = 平铺在根目录。
+    row.dataset.depth = String(depth);
+    row.style.setProperty("--ws-depth", String(depth));
     row.title = entry.url;
+    row.draggable = true;
     row.addEventListener("click", () => {
       if (getWorkspace().currentId === entry.id) return;
       handlers.load(entry.id);
+    });
+    row.addEventListener("dragstart", (event) => {
+      dragging = entry.id;
+      row.classList.add("dragging");
+      event.dataTransfer?.setData("text/plain", entry.id);
+      if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = "move";
+    });
+    row.addEventListener("dragend", () => {
+      dragging = null;
+      row.classList.remove("dragging");
+      host.querySelectorAll(".drag-over").forEach((item) => item.classList.remove("drag-over"));
     });
 
     const badge = document.createElement("span");
@@ -299,11 +356,172 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     return row;
   };
 
+  // 新建文件夹后直接进改名态：名字由用户当场给，取消就保留「新建文件夹」这个默认名。
+  const createFolder = (parentId: string | null): void => {
+    // 父级折叠着的话新行是看不见的，先展开它。
+    if (parentId !== null) collapsed.delete(parentId);
+    handlers.addFolder(parentId);
+    // addFolder 把新文件夹追加到 folders 末尾，也就是它那一级的最后一行。
+    const created = getWorkspace().folders.at(-1);
+    if (created === undefined || created.parentId !== (parentId ?? "")) return;
+    const target = host.querySelector<HTMLElement>(
+      `.ws-folder[data-id="${CSS.escape(created.id)}"] .ws-folder-name`,
+    );
+    if (target === null) return;
+    beginRename(target, created.name, (next) => handlers.renameFolder(created.id, next));
+  };
+
+  // 文件夹的落点：行本身和它的内容区空白都算。自己 stopPropagation，免得
+  // 事件冒到列表根部被当成「移回根目录」。
+  const wireFolderDrop = (target: HTMLElement, folderId: string, highlight: HTMLElement): void => {
+    target.addEventListener("dragover", (event) => {
+      if (dragging === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      highlight.classList.add("drag-over");
+    });
+    target.addEventListener("dragleave", (event) => {
+      if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) return;
+      highlight.classList.remove("drag-over");
+    });
+    target.addEventListener("drop", (event) => {
+      if (dragging === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      highlight.classList.remove("drag-over");
+      const moved = dragging;
+      dragging = null;
+      handlers.moveRequest(moved, folderId);
+    });
+  };
+
+  // 一个文件夹 = 一行 + 自己的内容容器；容器里放子文件夹（同样的行 + 容器）和请求。
+  // 行与容器是扁平兄弟，缩进靠 --ws-depth，折叠就是给容器加 hidden。
+  const folderNode = (folder: SavedFolder, depth: number, branch: HTMLElement): HTMLElement => {
+    const body = document.createElement("div");
+    body.className = "ws-folder-body";
+    body.hidden = collapsed.has(folder.id);
+
+    const row = document.createElement("div");
+    row.className = "ws-folder";
+    row.dataset.id = folder.id;
+    row.dataset.depth = String(depth);
+    row.style.setProperty("--ws-depth", String(depth));
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "ws-folder-toggle";
+    const folded = collapsed.has(folder.id);
+    toggle.textContent = folded ? "▸" : "▾";
+    toggle.setAttribute("aria-expanded", folded ? "false" : "true");
+
+    const name = document.createElement("span");
+    name.className = "ws-folder-name";
+    name.textContent = displayFolder(folder);
+    name.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      const live = liveFolder(folder.id);
+      if (live === undefined) return;
+      beginRename(name, live.name, (next) => handlers.renameFolder(folder.id, next));
+    });
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "ws-folder-add";
+    add.textContent = "＋";
+    add.title = t("sidebar.newSubfolder");
+    add.setAttribute("aria-label", t("sidebar.newSubfolder"));
+    add.addEventListener("click", (event) => {
+      event.stopPropagation();
+      createFolder(folder.id);
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ws-del";
+    remove.textContent = "×";
+    remove.title = t("sidebar.deleteFolder");
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const live = liveFolder(folder.id);
+      if (
+        live !== undefined &&
+        window.confirm(t("sidebar.deleteFolderConfirm", { name: displayFolder(live) }))
+      ) {
+        handlers.removeFolder(folder.id);
+      }
+    });
+
+    // 整行点击折叠/展开（点在名字或行内改名输入框上不算：名字那里双击是改名）。
+    row.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".ws-folder-name, .ws-edit") !== null) return;
+      toggleFolder(folder.id);
+    });
+
+    // 拖进来的请求落到这个文件夹末尾：整行和它的内容区空白都算落点
+    //（落在内容区里某条请求上，也是「放进这个文件夹」）。
+    wireFolderDrop(row, folder.id, row);
+    wireFolderDrop(body, folder.id, row);
+
+    row.append(toggle, name, add, remove);
+    folderBodies.set(folder.id, { body, toggle });
+    branch.append(row, body);
+    return body;
+  };
+
+  // 树：文件夹在前、请求在后，同一级都按顺序；根目录的请求就是没归任何文件夹的那些。
+  const drawBranch = (branch: HTMLElement, parentId: string, depth: number, placed: Set<string>): void => {
+    const state = getWorkspace();
+    for (const folder of childrenOf(parentId)) {
+      const body = folderNode(folder, depth, branch);
+      drawBranch(body, folder.id, depth + 1, placed);
+      for (const id of folder.requests) {
+        const entry = state.entries.find((item) => item.id === id);
+        if (entry !== undefined) body.append(entryRow(entry, state.currentId, depth + 1));
+      }
+    }
+    if (parentId !== "") return;
+    for (const entry of state.entries) {
+      if (placed.has(entry.id)) continue;
+      branch.append(entryRow(entry, state.currentId, 0));
+    }
+  };
+
+  // 列表本身是根目录的落点。文件夹行/内容区自己的落点已经 stopPropagation，
+  // 能冒到这里的只有列表空白和请求行——根目录的请求行当作根目录
+  //（文件夹里的请求行由所属文件夹的内容区接住了）。
+  const rootDropAllowed = (event: DragEvent): boolean => {
+    const target = event.target instanceof Element ? event.target.closest(".ws-folder, .ws-folder-body") : null;
+    return target === null;
+  };
+
+  const wireRootDrop = (list: HTMLElement): void => {
+    list.addEventListener("dragover", (event) => {
+      if (dragging === null || !rootDropAllowed(event)) return;
+      event.preventDefault();
+      list.classList.add("drag-over");
+    });
+    list.addEventListener("dragleave", (event) => {
+      if (event.relatedTarget instanceof Node && list.contains(event.relatedTarget)) return;
+      list.classList.remove("drag-over");
+    });
+    list.addEventListener("drop", (event) => {
+      if (dragging === null || !rootDropAllowed(event)) return;
+      event.preventDefault();
+      list.classList.remove("drag-over");
+      const moved = dragging;
+      dragging = null;
+      handlers.moveRequest(moved, null);
+    });
+  };
+
   const draw = (): void => {
     const state = getWorkspace();
     lastStructure = structure();
     lastCurrent = state.currentId;
     host.textContent = "";
+    folderBodies.clear();
 
     const panel = document.createElement("div");
     panel.className = "ws-panel";
@@ -358,6 +576,21 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
       });
       menu.append(item);
     }
+    // 文件夹和请求不是一类东西：隔一条线，免得点错。
+    const separator = document.createElement("div");
+    separator.className = "ws-new-sep";
+    separator.setAttribute("role", "separator");
+    const folderItem = document.createElement("button");
+    folderItem.type = "button";
+    folderItem.className = "ws-new-item";
+    folderItem.setAttribute("role", "menuitem");
+    folderItem.dataset.action = "newFolder";
+    folderItem.textContent = t("sidebar.newFolder");
+    folderItem.addEventListener("click", () => {
+      closeMenu();
+      createFolder(null);
+    });
+    menu.append(separator, folderItem);
     createButton.addEventListener("click", (event) => {
       event.stopPropagation();
       if (!menu.hidden) {
@@ -373,7 +606,7 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
 
     panel.append(title, actions, create, varsSection());
 
-    if (state.entries.length === 0) {
+    if (state.entries.length === 0 && state.folders.length === 0) {
       const empty = document.createElement("p");
       empty.className = "ws-empty";
       empty.textContent = t("sidebar.empty");
@@ -381,7 +614,17 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
     } else {
       const list = document.createElement("div");
       list.className = "ws-list";
-      for (const entry of state.entries) list.append(entryRow(entry, state.currentId));
+      wireRootDrop(list);
+      // 折叠状态只留还存在的文件夹：换工作区后旧 id 自然被丢掉。
+      for (const id of [...collapsed]) {
+        if (!state.folders.some((folder) => folder.id === id)) collapsed.delete(id);
+      }
+      // 已经在某个文件夹里的请求不再在根目录出现（Go 侧已保证一个请求只归一处）。
+      const placed = new Set<string>();
+      for (const folder of state.folders) {
+        for (const id of folder.requests) placed.add(id);
+      }
+      drawBranch(list, "", 0, placed);
       panel.append(list);
     }
 
@@ -426,6 +669,15 @@ export function mountWorkspaceSidebar(host: HTMLElement, handlers: WorkspaceHand
       const label = displayOf(entry);
       if (name !== null && name.textContent !== label) name.textContent = label;
       if (row.title !== entry.url) row.title = entry.url;
+    }
+
+    // 只改了名字的文件夹不重画：就地刷标签，别打断用户接着操作的那一行。
+    for (const row of host.querySelectorAll<HTMLElement>(".ws-folder")) {
+      const folder = liveFolder(row.dataset.id ?? "");
+      if (folder === undefined) continue;
+      const name = row.querySelector<HTMLElement>(".ws-folder-name");
+      const label = displayFolder(folder);
+      if (name !== null && name.textContent !== label) name.textContent = label;
     }
 
     if (state.currentId !== lastCurrent) {

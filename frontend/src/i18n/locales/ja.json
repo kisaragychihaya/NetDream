@@ -55,6 +55,11 @@
     "empty": ".band ワークスペースを開くか、「＋ リクエストを作成」から始めます",
     "deleteRequest": "リクエストを削除",
     "deleteConfirm": "リクエスト「{{name}}」を削除しますか？",
+    "newFolder": "フォルダを作成",
+    "newSubfolder": "サブフォルダを作成",
+    "deleteFolder": "フォルダを削除",
+    "deleteFolderConfirm": "フォルダ「{{name}}」を削除しますか？中のリクエストとサブフォルダは1つ上に移動します。",
+    "untitledFolder": "名称未設定のフォルダ",
     "droppedNotBand": "ドロップされたのは .band ワークスペースファイルではありません"
   },
   "urlbar": {
