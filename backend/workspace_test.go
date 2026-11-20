@@ -235,6 +235,14 @@ func TestWorkspaceMarkdownRoundTrip(t *testing.T) {
 			testRequest("r1", "列表接口"),
 			filled(SavedRequest{ID: "m1", Name: "接口说明", Kind: "markdown", Markdown: "# 标题\n\n- a\n- b"}),
 			filled(SavedRequest{ID: "m2", Kind: "markdown"}), // 未命名文档
+			filled(SavedRequest{ID: "r2", Name: "带示例的请求", Examples: []SavedExample{{
+				ID:      "ex1",
+				SavedAt: 1730000000000,
+				Response: APIResponse{
+					Status: 200, StatusText: "OK", Proto: "HTTP/1.1",
+					Body: "{\"ok\":true}", TimeMS: 12, SizeBytes: 11,
+				},
+			}}}),
 		},
 		Vars: map[string]string{},
 	}

@@ -162,6 +162,9 @@
     "streamEnded": "ストリームが終了しました",
     "ended": "終了しました",
     "headerCount": "レスポンスヘッダー {{count}} 件",
+    "exampleSave": "レスポンス例として保存",
+    "exampleEmpty": "レスポンス例はまだありません:「リアルタイムレスポンス」の保存アイコンで追加",
+    "exampleDelete": "レスポンス例を削除",
     "eventCount": "イベント {{count}} 件",
     "columnEvent": "イベント",
     "waitingEvents": "イベントを待機中…",
@@ -176,8 +179,7 @@
     "requestHeaders": "リクエストヘッダー（{{count}}）",
     "noRequestHeaders": "リクエストヘッダーがありません",
     "requestBody": "リクエストボディ",
-    "noRequestBody": "（リクエストボディなし）",
-    "comingSoon": "近日対応"
+    "noRequestBody": "（リクエストボディなし）"
   },
   "assert": {
     "title": "アサーションと検証",

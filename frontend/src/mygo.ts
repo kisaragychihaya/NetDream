@@ -147,6 +147,19 @@ export interface SavedAssertion {
 }
 
 /**
+ * SavedExample 是响应示例：一次响应的快照，随请求条目落盘。
+ * 列表结构为将来多示例扩展预留，目前界面只保存一条（新示例覆盖旧的）。
+ */
+export interface SavedExample {
+  id: string;
+  /** 展示名；空 = 界面按保存时间给 */
+  name: string;
+  /** Unix 毫秒 */
+  savedAt: number;
+  response: APIResponse;
+}
+
+/**
  * SavedFolder 是工作区请求树里的一个文件夹；parentId 空 = 根目录。
  * requests 按显示顺序存请求 ID；不在任何文件夹的请求平铺在根目录。
  */
@@ -203,6 +216,8 @@ export interface SavedRequest {
   socketIOVersion: string;
   /** Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用 */
   socketIOPath: string;
+  /** Examples 是响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。nil 落盘补 []（生成 TS 类型要求） */
+  examples: SavedExample[];
 }
 
 export interface SavedSocketEvent {

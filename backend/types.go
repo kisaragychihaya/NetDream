@@ -193,6 +193,15 @@ type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的
 	Description string `json:"description"` // 备注，不发送
 }
 
+// SavedExample 是响应示例：一次响应的快照，随请求条目落盘。
+// 列表结构为将来多示例扩展预留，目前界面只保存一条（新示例覆盖旧的）。
+type SavedExample struct {
+	ID       string      `json:"id"`
+	Name     string      `json:"name"`    // 展示名；空 = 界面按保存时间给
+	SavedAt  int64       `json:"savedAt"` // Unix 毫秒
+	Response APIResponse `json:"response"`
+}
+
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID              string             `json:"id"`
 	Name            string             `json:"name"`
@@ -221,6 +230,8 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	SocketEvents    []SavedSocketEvent `json:"socketEvents"`    // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
 	SocketIOVersion string             `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
 	SocketIOPath    string             `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
+	// Examples 是响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。nil 落盘补 []（生成 TS 类型要求）
+	Examples []SavedExample `json:"examples"`
 }
 
 // SavedFolder 是工作区请求树里的一个文件夹；parentId 空 = 根目录。

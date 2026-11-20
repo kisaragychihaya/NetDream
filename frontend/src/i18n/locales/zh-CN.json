@@ -162,6 +162,9 @@
     "streamEnded": "流已结束",
     "ended": "已结束",
     "headerCount": "响应头 {{count}} 个",
+    "exampleSave": "存为响应示例",
+    "exampleEmpty": "暂无响应示例：在「实时响应」点保存图标即可添加",
+    "exampleDelete": "删除响应示例",
     "eventCount": "事件 {{count}} 条",
     "columnEvent": "事件",
     "waitingEvents": "等待事件…",
@@ -176,8 +179,7 @@
     "requestHeaders": "请求头（{{count}}）",
     "noRequestHeaders": "没有请求头",
     "requestBody": "请求体",
-    "noRequestBody": "（无请求体）",
-    "comingSoon": "即将支持"
+    "noRequestBody": "（无请求体）"
   },
   "assert": {
     "title": "断言与校验",

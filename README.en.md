@@ -17,7 +17,7 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **SSE streaming**: live event table, stop anytime
 - **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
 - **Socket.IO debugging**: Socket.IO v3 / v4 / v5 (EIO4) and v2 (EIO3), URL path as namespace, configurable handshake path, event name + ack on send, per-event listen filtering (no reconnect needed)
-- **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy
+- **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy; response examples save the current response into the request entry (persisted in .band) for later comparison
 - **Assertions panel**: status code, contains / not-contains, response time
 - **Pre / post scripts**: executed by a goja engine — pre scripts can rewrite the request, post scripts can assert on the response, both can read/write variables; console output lands in the "Console" tab, assertions in the assertions panel
 - **Variables**: editable in the sidebar; `{{name}}` placeholders in URL / headers / body are substituted before sending, and scripts share the same store via `nd.vars`
@@ -78,7 +78,7 @@ bunx mygo build -platform windows/amd64 -skip-installer
 - Workspace path is not remembered across restarts; only the editor draft is restored, the list comes back by reopening a .band
 - No search in the sidebar list; sibling order is adjusted by dragging into a folder / the root tail (no same-level drag handles)
 - Markdown has no math, image upload, recording or export (runtime assets are localized on demand; exotic diagram blocks render as plain code blocks)
-- The "response example" tab is a placeholder
+- Only one response example per request (the list structure is ready for multi-example expansion)
 
 ## License
 

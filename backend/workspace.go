@@ -429,5 +429,8 @@ func filled(req SavedRequest) SavedRequest {
 	if req.SocketEvents == nil {
 		req.SocketEvents = []SavedSocketEvent{}
 	}
+	if req.Examples == nil {
+		req.Examples = []SavedExample{}
+	}
 	return req
 }

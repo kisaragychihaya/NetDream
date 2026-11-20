@@ -162,6 +162,9 @@
     "streamEnded": "Stream ended",
     "ended": "Ended",
     "headerCount": "{{count}} headers",
+    "exampleSave": "Save as response example",
+    "exampleEmpty": "No response example yet: click the save icon in \"Live response\" to add one",
+    "exampleDelete": "Delete response example",
     "eventCount": "{{count}} events",
     "columnEvent": "Event",
     "waitingEvents": "Waiting for events…",
@@ -176,8 +179,7 @@
     "requestHeaders": "Request Headers ({{count}})",
     "noRequestHeaders": "No request headers",
     "requestBody": "Request Body",
-    "noRequestBody": "(no request body)",
-    "comingSoon": "Coming soon"
+    "noRequestBody": "(no request body)"
   },
   "assert": {
     "title": "Assertions",

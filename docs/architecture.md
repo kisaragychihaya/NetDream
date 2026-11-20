@@ -489,6 +489,7 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	SocketEvents   []SavedSocketEvent `json:"socketEvents"` // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
 	SocketIOVersion string      `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
 	SocketIOPath    string      `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
+	Examples        []SavedExample `json:"examples"`    // 响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条；nil 落盘补 []
 }
 
 type WorkspaceData struct {
@@ -662,11 +663,14 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 - 响应工具栏在状态徽章旁显示协议版本（`response.proto`，如 HTTP/2.0）。
 - Body 类型单选：none / form-data / urlencoded / binary / raw；raw 选中时出现子类型
   下拉（JSON/Text/XML/HTML）。
-- 响应区选项卡：实时响应 / 响应头(n) / Cookie / 实际请求 / 控制台（n 为数量）；
-  「响应示例」渲染为占位灰字「即将支持」。控制台页 = 脚本 console 输出
+- 响应区选项卡：实时响应 / 响应头(n) / Cookie / 实际请求 / 响应示例 / 控制台
+  （n 为数量）。响应示例页 = 已存示例的只读展示（状态徽章 + 保存时间 + 美化/原生/
+  预览/复制 + 大叉删除），无示例时给引导文案；示例存编辑器状态 `examples`
+  （SavedExample 列表，目前只存一条，为多示例扩展预留），随请求快照进 .band；
+  实时响应工具栏有「存为响应示例」图标按钮（无响应时禁用）。控制台页 = 脚本 console 输出
   （时间 + 级别徽标 log 灰/warn 橙/error 红 + 等宽文本）与两条脚本错误行，
   空态「暂无日志」。
-- 实时响应工具栏：美化 | 原生 | 预览（iframe `sandbox=allow-scripts` srcdoc，注入 `<base href=请求URL>`，相对资源可加载）、复制按钮；
+- 实时响应工具栏：美化 | 原生 | 预览（iframe `sandbox=allow-scripts` srcdoc，注入 `<base href=请求URL>`，相对资源可加载）、存为响应示例（图标按钮）、复制按钮；
   美化 = JSON 可解析时 pretty+高亮；否则识别 HTML 时格式化缩进+标签/属性/注释高亮；再否则转义文本；状态徽章按时态着色（2xx 绿/3xx 蓝/4xx 橙/5xx 红）。
 - 断言面板：开关折叠；规则列表（启用框、类型下拉、期望值输入、删除）；
   发送后逐条显示 ✓ 绿 / ✗ 红 + actual 值。规则下方「脚本测试 n / m」分组

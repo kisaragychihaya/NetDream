@@ -6,6 +6,7 @@ import type {
   APIResponse,
   FormField,
   KeyValue,
+  SavedExample,
   SavedFolder,
   SavedMessage,
   SavedRequest,
@@ -101,6 +102,8 @@ export interface RequestState {
   postScript: string;
   /** kind="markdown" 的文档内容；其余 kind 恒为空串。 */
   markdown: string;
+  /** 响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。 */
+  examples: SavedExample[];
 }
 
 export interface ResponseState {
@@ -171,6 +174,7 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     preScript: "",
     postScript: "",
     markdown: "",
+    examples: [],
   };
 }
 
@@ -236,6 +240,31 @@ export function setFormFilePath(index: number, path: string): void {
 export function updateResponse(patch: Partial<ResponseState>): void {
   Object.assign(runtime, patch);
   notify();
+}
+
+/**
+ * 把当前响应存为响应示例（新示例覆盖旧的一条——列表结构为将来多示例扩展预留）。
+ * 示例是编辑器状态的一部分，随保存/发送快照进 .band；与请求字段同理，编辑本身不置脏。
+ */
+export function saveCurrentExample(): void {
+  const response = getResponse().response;
+  if (response === null) return;
+  const example: SavedExample = {
+    id: newId(),
+    name: "",
+    savedAt: Date.now(),
+    response,
+  };
+  updateRequest((state) => {
+    state.examples = [example];
+  });
+}
+
+/** 删除一条响应示例。 */
+export function deleteExample(id: string): void {
+  updateRequest((state) => {
+    state.examples = state.examples.filter((example) => example.id !== id);
+  });
 }
 
 let streamChannel: Channel<SSEMessage> | null = null;
@@ -450,6 +479,21 @@ function hydrateSocketEvents(value: unknown): SavedSocketEvent[] {
   return events;
 }
 
+function hydrateExamples(value: unknown): SavedExample[] {
+  if (!Array.isArray(value)) return [];
+  const examples: SavedExample[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || !isRecord(item.response)) continue;
+    examples.push({
+      id: text(item.id) || newId(),
+      name: text(item.name),
+      savedAt: typeof item.savedAt === "number" && Number.isFinite(item.savedAt) ? item.savedAt : 0,
+      response: item.response as unknown as SavedExample["response"],
+    });
+  }
+  return examples;
+}
+
 function hydrate(source: Record<string, unknown>): RequestState {
   const auth = isRecord(source.auth) ? source.auth : {};
   return {
@@ -483,6 +527,7 @@ function hydrate(source: Record<string, unknown>): RequestState {
     preScript: text(source.preScript),
     postScript: text(source.postScript),
     markdown: text(source.markdown),
+    examples: hydrateExamples(source.examples),
   };
 }
 
@@ -669,6 +714,7 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     preScript: text(saved.preScript),
     postScript: text(saved.postScript),
     markdown: text(saved.markdown),
+    examples: saved.examples.map((example) => ({ ...example })),
   };
 }
 
@@ -745,6 +791,7 @@ export function newMarkdownDocument(): void {
     preScript: "",
     postScript: "",
     markdown: "",
+    examples: [],
   };
   workspace.entries = [...workspace.entries, entry];
   workspace.currentId = entry.id;
@@ -975,6 +1022,7 @@ export function snapshotCurrent(): SavedRequest {
     preScript: state.preScript,
     postScript: state.postScript,
     markdown: state.markdown,
+    examples: state.examples.map((example) => ({ ...example })),
   };
 }
 

@@ -1,6 +1,14 @@
 import { onLangChange, t } from "../i18n";
-import type { APIResponse, ScriptLog, ScriptTest, SSEEvent, SSEOpen } from "../mygo";
-import { getResponse, stopStream, subscribe, type ResponseState } from "../state";
+import type { APIResponse, SavedExample, ScriptLog, ScriptTest, SSEEvent, SSEOpen } from "../mygo";
+import {
+  deleteExample,
+  getRequest,
+  getResponse,
+  saveCurrentExample,
+  stopStream,
+  subscribe,
+  type ResponseState,
+} from "../state";
 import { createTabs, type TabDef, type TabsHandle } from "./tabs";
 
 type ResponseTabId = "body" | "headers" | "cookies" | "actual" | "example" | "console";
@@ -43,6 +51,8 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
   let lastScriptTests: readonly ScriptTest[] = getResponse().scriptTests;
   let lastPreScriptError: string | null = getResponse().preScriptError;
   let lastPostScriptError: string | null = getResponse().postScriptError;
+  // 响应示例在编辑器状态（getRequest）里，响应区自己跟：换了就要重画示例页。
+  let lastExamples: readonly SavedExample[] = getRequest().examples;
   let streamRefs: StreamRefs | null = null;
 
   const tabDefs = (state: ResponseState): TabDef[] => {
@@ -84,9 +94,155 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
         return actualTab(state.response);
       case "console":
         return consoleTab(state);
+      case "example":
+        return exampleTab();
       default:
-        return placeholderTab();
+        // 页签集合固定六项，走不到；兜底回实时响应。
+        return bodyTab(state);
     }
+  }
+
+  // 响应示例页：单条示例的只读展示（状态/时间 + 美化/原生/预览 + 复制 + 大叉删除）。
+  // examples 是列表结构，目前界面只存一条（[0]），为多示例扩展预留。
+  function exampleTab(): HTMLElement {
+    const example = getRequest().examples[0];
+    if (example === undefined) {
+      const root = resTabRoot();
+      const scroll = document.createElement("div");
+      scroll.className = "res-scroll";
+      scroll.append(emptyState(t("response.exampleEmpty")));
+      root.append(scroll);
+      return root;
+    }
+
+    const root = resTabRoot();
+    const toolbar = document.createElement("div");
+    toolbar.className = "res-toolbar";
+
+    const badge = document.createElement("span");
+    badge.className = `status-badge s${Math.floor(example.response.status / 100)}`;
+    badge.textContent = example.response.statusText || String(example.response.status);
+    toolbar.append(badge);
+    if (example.response.proto) toolbar.append(protoText(example.response.proto));
+    toolbar.append(metaText(`${example.response.timeMS} ms`));
+    toolbar.append(metaText(formatBytes(example.response.sizeBytes)));
+    toolbar.append(metaText(example.name.trim() !== "" ? example.name : t("response.example")));
+    toolbar.append(metaText(formatTime(example.savedAt)));
+
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    toolbar.append(spacer);
+
+    toolbar.append(viewModeSeg());
+    toolbar.append(copyButton(example.response.body));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "example-del";
+    remove.textContent = "×";
+    remove.title = t("response.exampleDelete");
+    remove.setAttribute("aria-label", t("response.exampleDelete"));
+    remove.dataset.i18nAttr = "title:response.exampleDelete;aria-label:response.exampleDelete";
+    remove.addEventListener("click", () => deleteExample(example.id));
+    toolbar.append(remove);
+
+    root.append(toolbar, bodyScroll(example.response, null, false));
+    return root;
+  }
+
+  // 美化 / 原生 / 预览 分段（实时响应与响应示例共用）。
+  function viewModeSeg(): HTMLElement {
+    const seg = document.createElement("div");
+    seg.className = "seg";
+    for (const option of VIEW_MODES) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "seg-btn";
+      button.classList.toggle("active", mode === option.value);
+      button.textContent = t(option.labelKey);
+      button.addEventListener("click", () => {
+        if (mode === option.value) return;
+        mode = option.value;
+        render();
+      });
+      seg.append(button);
+    }
+    return seg;
+  }
+
+  // 复制按钮；body 为 null（还没响应）时禁用。点击后短暂反馈结果。
+  function copyButton(body: string | null): HTMLButtonElement {
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "copy-btn";
+    copy.textContent = t("common.copy");
+    copy.disabled = body === null;
+    copy.addEventListener("click", () => {
+      if (body === null) return;
+      void copyText(body).then((ok) => {
+        if (!copy.isConnected) return;
+        copy.textContent = ok ? t("common.copied") : t("common.copyFailed");
+        window.setTimeout(() => {
+          if (copy.isConnected) copy.textContent = t("common.copy");
+        }, 1200);
+      });
+    });
+    return copy;
+  }
+
+  // 响应体滚动区（错误条 / 空态 / 沙箱预览 / 美化高亮，三处共用）。
+  function bodyScroll(response: APIResponse | null, error: string | null, sending: boolean): HTMLElement {
+    const scroll = document.createElement("div");
+    scroll.className = "res-scroll";
+
+    if (error) {
+      const box = document.createElement("div");
+      box.className = "res-error";
+      box.textContent = error;
+      scroll.append(box);
+    } else if (!response) {
+      scroll.append(emptyState(sending ? t("response.sending") : t("response.emptyHint")));
+    } else if (mode === "preview") {
+      const frame = document.createElement("iframe");
+      frame.className = "res-preview";
+      // Scripts may run, but without allow-same-origin the page keeps an
+      // opaque origin: it cannot read the app, its storage or its cookies.
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.srcdoc = previewDocument(response);
+      scroll.append(frame);
+    } else {
+      const pre = document.createElement("pre");
+      pre.className = "res-body";
+      if (response.body === "") {
+        pre.textContent = t("response.emptyBody");
+        pre.classList.add("is-empty");
+      } else if (mode === "raw") {
+        pre.textContent = response.body;
+      } else {
+        pre.innerHTML = prettyBody(response.body);
+      }
+      scroll.append(pre);
+    }
+
+    return scroll;
+  }
+
+  // 实时响应工具条上的「存为响应示例」图标按钮（无响应时禁用）。
+  function saveExampleButton(response: APIResponse | null): HTMLButtonElement {
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "save-example-btn";
+    save.disabled = response === null;
+    save.title = t("response.exampleSave");
+    save.setAttribute("aria-label", t("response.exampleSave"));
+    save.dataset.i18nAttr = "title:response.exampleSave;aria-label:response.exampleSave";
+    save.innerHTML =
+      '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
+    save.addEventListener("click", () => {
+      if (response === null) return;
+      saveCurrentExample();
+    });
+    return save;
   }
 
   // 控制台 = 前后脚本的 console.* 输出 + 两条脚本错误行。
@@ -163,75 +319,12 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     spacer.className = "spacer";
     toolbar.append(spacer);
 
-    const seg = document.createElement("div");
-    seg.className = "seg";
-    for (const option of VIEW_MODES) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "seg-btn";
-      button.classList.toggle("active", mode === option.value);
-      button.textContent = t(option.labelKey);
-      button.addEventListener("click", () => {
-        if (mode === option.value) return;
-        mode = option.value;
-        render();
-      });
-      seg.append(button);
-    }
-    toolbar.append(seg);
-
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "copy-btn";
-    copy.textContent = t("common.copy");
-    copy.disabled = response === null;
-    copy.addEventListener("click", () => {
-      if (!response) return;
-      void copyText(response.body).then((ok) => {
-        if (!copy.isConnected) return;
-        copy.textContent = ok ? t("common.copied") : t("common.copyFailed");
-        window.setTimeout(() => {
-          if (copy.isConnected) copy.textContent = t("common.copy");
-        }, 1200);
-      });
-    });
-    toolbar.append(copy);
+    toolbar.append(viewModeSeg());
+    toolbar.append(saveExampleButton(response));
+    toolbar.append(copyButton(response === null ? null : response.body));
 
     root.append(toolbar);
-
-    const scroll = document.createElement("div");
-    scroll.className = "res-scroll";
-
-    if (error) {
-      const box = document.createElement("div");
-      box.className = "res-error";
-      box.textContent = error;
-      scroll.append(box);
-    } else if (!response) {
-      scroll.append(emptyState(sending ? t("response.sending") : t("response.emptyHint")));
-    } else if (mode === "preview") {
-      const frame = document.createElement("iframe");
-      frame.className = "res-preview";
-      // Scripts may run, but without allow-same-origin the page keeps an
-      // opaque origin: it cannot read the app, its storage or its cookies.
-      frame.setAttribute("sandbox", "allow-scripts");
-      frame.srcdoc = previewDocument(response);
-      scroll.append(frame);
-    } else {
-      const pre = document.createElement("pre");
-      pre.className = "res-body";
-      if (response.body === "") {
-        pre.textContent = t("response.emptyBody");
-        pre.classList.add("is-empty");
-      } else if (mode === "raw") {
-        pre.textContent = response.body;
-      } else {
-        pre.innerHTML = prettyBody(response.body);
-      }
-      scroll.append(pre);
-    }
-
-    root.append(scroll);
+    root.append(bodyScroll(response, error, sending));
     return root;
   }
 
@@ -467,6 +560,8 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const testsChanged = next.scriptTests !== lastScriptTests;
     const scriptErrorChanged =
       next.preScriptError !== lastPreScriptError || next.postScriptError !== lastPostScriptError;
+    const nextExamples = getRequest().examples;
+    const examplesChanged = nextExamples !== lastExamples;
 
     lastResponse = next.response;
     lastOpen = next.open;
@@ -479,6 +574,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     lastScriptTests = next.scriptTests;
     lastPreScriptError = next.preScriptError;
     lastPostScriptError = next.postScriptError;
+    lastExamples = nextExamples;
 
     if (
       !responseChanged &&
@@ -490,7 +586,8 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       !eventsChanged &&
       !logsChanged &&
       !testsChanged &&
-      !scriptErrorChanged
+      !scriptErrorChanged &&
+      !examplesChanged
     ) {
       return;
     }
@@ -505,7 +602,8 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
       streamingChanged ||
       stoppedChanged ||
       logsChanged ||
-      scriptErrorChanged;
+      scriptErrorChanged ||
+      examplesChanged;
     if (!structural) {
       if (active !== "body") return;
       if (streamRefs !== null) appendStreamEvents();
@@ -543,15 +641,6 @@ function emptyState(message: string): HTMLElement {
   box.className = "empty-state";
   box.textContent = message;
   return box;
-}
-
-function placeholderTab(): HTMLElement {
-  const root = resTabRoot();
-  const box = document.createElement("div");
-  box.className = "placeholder";
-  box.textContent = t("response.comingSoon");
-  root.append(box);
-  return root;
 }
 
 type ScriptLevel = "log" | "warn" | "error";
@@ -685,6 +774,11 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+// 示例保存时间的展示格式（跟随系统区域设置）。
+function formatTime(at: number): string {
+  return new Date(at).toLocaleString();
 }
 
 function escapeHTML(text: string): string {
