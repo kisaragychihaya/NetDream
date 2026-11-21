@@ -210,7 +210,7 @@ func TestBandContainerTrustFlow(t *testing.T) {
 	if opened.Trust == nil {
 		t.Fatalf("别人的签名应该先问信任：%#v", opened)
 	}
-	if opened.File.Path != "" || len(opened.File.Data.Requests) != 0 {
+	if opened.File != nil {
 		t.Fatalf("信任之前不该有数据：%#v", opened.File)
 	}
 	prompt := opened.Trust

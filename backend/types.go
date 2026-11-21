@@ -260,9 +260,11 @@ type WorkspaceFile struct {
 
 // WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空。
 // 用户取消对话框时两个都为空（等价旧的 WorkspaceFile{}）。
+// File 必须是指针：struct 上的 omitempty 不会省略零值结构体，
+// 非指针会让 file 永远出现在 JSON 里，前端把信任弹窗当成空文件静默吞掉。
 type WorkspaceOpen struct {
-	File  WorkspaceFile `json:"file,omitempty"`
-	Trust *TrustPrompt  `json:"trust,omitempty"`
+	File  *WorkspaceFile `json:"file,omitempty"`
+	Trust *TrustPrompt   `json:"trust,omitempty"`
 }
 
 // TrustPrompt 是 v2 容器里未知身份的签名者信息；信任弹窗据此展示。

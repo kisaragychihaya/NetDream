@@ -378,6 +378,8 @@ export interface WorkspaceFile {
 /**
  * WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空。
  * 用户取消对话框时两个都为空（等价旧的 WorkspaceFile{}）。
+ * File 必须是指针：struct 上的 omitempty 不会省略零值结构体，
+ * 非指针会让 file 永远出现在 JSON 里，前端把信任弹窗当成空文件静默吞掉。
  */
 export interface WorkspaceOpen {
   file?: WorkspaceFile;

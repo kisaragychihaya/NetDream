@@ -108,7 +108,7 @@ func openWorkspace(path string) (WorkspaceOpen, error) {
 		}
 		// v1 是明文归档：之前记下的加密信封不能再用到这个路径上。
 		rememberBandEnvelope(path, nil)
-		return WorkspaceOpen{File: WorkspaceFile{Path: path, Data: data}}, nil
+		return WorkspaceOpen{File: &WorkspaceFile{Path: path, Data: data}}, nil
 	}
 
 	read, err := stageBandRead(path, defaultBandContainerLimits())
@@ -125,7 +125,7 @@ func openWorkspace(path string) (WorkspaceOpen, error) {
 	if err != nil {
 		return WorkspaceOpen{}, err
 	}
-	return WorkspaceOpen{File: WorkspaceFile{Path: path, Data: data, Encrypted: read.header.Encrypted}}, nil
+	return WorkspaceOpen{File: &WorkspaceFile{Path: path, Data: data, Encrypted: read.header.Encrypted}}, nil
 }
 
 // ResolveTrust 是信任弹窗的答复：remember=false 是「信任一次」（只在这次打开
