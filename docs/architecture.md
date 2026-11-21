@@ -13,22 +13,26 @@ backend/
   service.go           # RequestService：Send（脚本编排）、PickFile（仅有的两个导出方法）+ APIRequest↔protocol.HTTPRequest / APIResponse↔protocol.HTTPResponse 的机械映射
   socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
+  script_test.go       # 脚本日志/测试结果的保留上限、按 rune 截断、Go 侧 pbkdf2 的可取消性
   ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
   workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写 + 请求树归一化
   workspace_test.go    # .band 往返、旧格式兼容、folders 归一化（readBandBytes/writeBand）
+  workspace_limits_test.go # .band 解压限额（单条/累计/归档本身）与 zip bomb 拒绝
   protocol/            # 网络协议实现（package protocol，不 import main；契约类型由 main 映射进来）
     types.go           # 自有的协议类型：KeyValue、FormField、AuthInfo、HTTPRequest/HTTPResponse、ResponseCookie、SSEOpen/SSEEvent/SSEMessage、Emit、ConnectParams、SendParams、SocketEvent、Sink
-    http.go            # Do：URL/Body 构造、头与 Cookie、认证、超时、h2c、响应整形与截断（代理见 proxy*.go）
-    sse.go             # SSE：Content-Type 判定、Open/Event 经 Emit 回调推送、事件流解析器
+    http.go            # Do：URL/Body 构造、头与 Cookie、认证、超时、h2c、响应整形与截断（transport 进程级共享，代理按请求查；见 proxy*.go）
+    sse.go             # SSE：Content-Type 判定、Open/Event 经 Emit 回调推送、事件流解析器（单行 1MiB、单事件 data 10MiB 限额）
     socket.go          # 连接注册表 + WS/TCP 读写循环 + Connect/Send/Disconnect
+    socket_test.go     # Connect 的取消语义：WS/TCP 读中取消、握手中取消、Disconnect 结束读循环
     socketio.go        # Socket.IO（Socket.IO v5/EIO4 与 v2/EIO3）：握手、心跳、EVENT/ACK/CONNECT_ERROR、二进制占位
     proxy*.go          # 系统代理（Windows 注册表 / macOS scutil / 其他平台直连），build tag 跟文件走
 frontend/
   index.html           # 静态骨架（id 见下）
   src/
     main.ts            # 入口：装配各模块；按编辑器 kind 切换 HTTP / Socket 视图
-    monacoSetup.ts     # Monaco 装配：worker 注册 + nd API 补全库（extraLib）
-    state.ts           # 请求/响应/工作区/变量状态 + localStorage 持久化 + 事件
+    monacoSetup.ts     # Monaco 按需装配：loadMonaco() 动态加载裁剪后的编辑器 + worker 注册 + nd API 补全库（extraLib）
+    monacoContributions.ts # Monaco 保留的 contribution 清单（副作用导入，见「脚本编辑器」）
+    state.ts           # 请求/响应/工作区/变量状态 + SSE 事件合帧与保留上限 + localStorage 持久化 + 事件
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
     assert.ts          # 断言规则模型 + runAssertions 纯函数
     components/
@@ -45,6 +49,7 @@ frontend/
       assertionsPanel.ts # 断言与校验侧栏
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
       closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
+      scriptTrust.ts   # 脚本信任确认框（打开的 .band 带脚本时，首次执行脚本前问一次）
   src/mygo.ts          # `mygo generate` 生成，禁止手改
   style.css
 scripts/
@@ -244,6 +249,9 @@ type SocketEvent struct {
     返回 error，前端将其视为「用户停止」吞掉。
   - SSE 解析按规范：空行分派事件；`data:` 多行以 \n 拼接；`event:`/`id:` 透传；
     `:` 开头注释与 `retry:` 忽略。
+  - SSE 两条限额，超出一条就报错结束流（前端显示这条错误，已收到的事件保留）：
+    单行 >1MiB 视为不是可解析的事件流；**单事件**的 `data:` 累计 >10MiB 同样拒绝
+    （一行一条的上限挡不住一个事件用成千上万行慢慢堆到吃光内存）。
   - Query 参数拼到 URL；BodyType 语义：
     - `formData` → `multipart/form-data`（文本字段直写；`Kind="file"` 的字段把
       `FilePath` 读盘作为文件 part 上传：filename=basename，Content-Type 取字段显式值
@@ -269,12 +277,19 @@ type SocketEvent struct {
     无脚本但 Vars 非空时同样执行。
   - 后执行脚本（PostScript 非空）：拿到响应后执行（SSE 在流正常结束后，Body 为空）；
     出错只记 `PostScriptError`，已拿到的响应保留。
-  - 脚本 API（同步；单次 5s `vm.Interrupt` 超时 + 页面关闭取消）：
+  - 脚本 API（同步；单次 5s 超时 + 页面关闭取消）：
+    - 两条停止路径共用同一个 `context.WithTimeout(ctx, 5s)`：停在 JS 里的（死循环、
+      `nd.test` 内的死循环）由 `vm.Interrupt` 打断；纯 Go 里烧时间的
+      `nd.crypto.pbkdf2`（10M 轮上限，能跑满好几秒）在循环里每 256 轮看一眼这个
+      context，自己抛 `ndapi.AbortError` 提前退出（`vm.Interrupt` 到不了 Go 循环）。
+      两者最终都报既有的「超时：超过 5s 未执行完，已中断」/「已取消」两条消息。
     - `nd.vars`：get/set/unset/has/toObject（快照进、全量出，写回经 APIResponse.Vars）
     - `nd.request`：`{method,url,headers,query,body}`；预脚本可写并回写 DTO
       （headers/query 大小写不敏感 diff：消失或 null 删除、新写法覆盖；body 改了则
       BodyType=raw、RawType 空补 text），后脚本为只读快照
     - `nd.response`（仅后脚本）：`{status,statusText,headers,body,timeMS,sizeBytes}` + `json()`
+      （`json()` 只调一次 `JSON.parse`：后端不再用 Go 预解析一遍，解析错误带
+      `nd.response.json():` 前缀，脚本可以 try/catch 自己处理）
     - `nd.test(name, fn)`（fn 抛异常 = 失败，不中断脚本）、`nd.assert(cond, msg)`
     - `nd.crypto`：md5/sha1/sha256/sha512（encoding 默认 hex）、hmac、base64(+url)、
       hex、aesEncrypt/aesDecrypt（cbc 默认 PKCS#7 / gcm，key、iv 为 base64）、
@@ -284,7 +299,10 @@ type SocketEvent struct {
       失败返回 null 而非抛异常）、`offset()`/`zone()`（本地偏移分钟数，符号同
       Date.getTimezoneOffset()）——Date 的解析与 toLocale* 在 goja 里不可靠，
       时区相关一律走这里（backend/ndapi/time.go）
-    - `console.log/warn/error(...)` → ScriptLogs（「控制台」页签）
+    - `console.log/warn/error(...)` → ScriptLogs（「控制台」页签），
+      保留上限 1000 条、单条 64KiB（按 `utf8` 边界截断）；超出部分丢弃，
+      并在末尾追加一条 warn 说明丢了多少条（`nd.test` 结果同理，上限 1000 条）。
+      这只限制后端保留的量，不限制脚本自己的 JS 堆。
 - `PickFile() (string, error)` — 原生打开文件对话框（`mygo.Dialog.Open`），
   用户取消时返回 `("", nil)`。
 
@@ -320,6 +338,12 @@ TCP 文本判定、Socket.IO 包编解码）一律未导出。
   - 读循环因对端关闭/错误退出 → 推 `close`（WS 带 Code/Reason；TCP EOF 无码）后返回 nil。
   - 用户 Disconnect / 页面关闭（ctx 取消）→ 不再推事件，清理注册表并返回
     （error 由前端按「用户停止」吞掉，语义同 SSE）。
+  - **取消要关传输，不只是标志位**：`ReadMessage` / `Read` 只会在套接字关闭时返回，
+    所以 `Connect` 用 `context.AfterFunc(ctx, conn.stop)` 在取消时关掉传输（返回前
+    `stopOnCancel()` 摘掉回调，避免回调泄漏；`stop` 幂等，重复调用安全）。
+    WS 握手中取消原本要等满 30s `HandshakeTimeout`：dialer 的 `NetDialContext` 把
+    拨号产生的原始 `net.Conn` 记在 `socketConn` 上，`stop` 一并关闭它。取消导致的
+    dial 失败返回 `ctx.Err()`（前端在「用户停止」时不显示），而不是底层连接被重置的报错。
 - `Send(params SocketSendParams) error` — 注册表定位连接；不存在/已关闭 → error；
   IsBinary 时 base64 解码失败 → error；WS 写 Text/Binary 消息，TCP 写原始字节；
   写失败返回 error（读循环随后以 close 收尾）。
@@ -398,6 +422,13 @@ requests/<id>.json      # 每个已保存请求 / Markdown 文档一个文件，
 `workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 与
 `engine/vars.json` 解析失败的条目跳过（vars 失败 = 空变量表，不报错）。
 
+**解压限额**（`readBand`/`readBandBytes`）：`.band` 是不可信输入，手工造一个 zip bomb
+就能把内存吃光，所以读之前先设上限——归档本身 128MiB（先 `os.Stat` 再看是否读）、
+单个条目 32MiB、累计解压 256MiB。限额留足正常内容（后端最大响应体 10MiB、Markdown
+文档）的余量；判定既看条目声明的大小，也看实际读出的字节（声明值可以造假）。**超限与
+"坏条目跳过"语义不同**：整个归档报错（`errBandLimit`，错误里点名是哪个条目/哪种限额），
+不会安静地丢条目——用户会以为内容存下来了。
+
 **请求分组（请求树）**：`folders` 是 `SavedFolder[]`，`[{id, name, parentId, requests}]`——
 `parentId` 空串 = 根目录，`requests` 按显示顺序存请求 ID。层级只存在这一个字段里
 （`requests/*.json` 不带归属信息），所以换工具打开时请求本身不受影响。
@@ -429,7 +460,14 @@ requests/<id>.json      # 每个已保存请求 / Markdown 文档一个文件，
 - `SetDirty(dirty bool)` — 前端推送工作区脏状态；脏时关闭窗口会先问过页面。
 - `CloseWindow()` — 页面用户选择「不保存」后调用：强制关闭窗口（一次性 force，
   见 backend/close.go）。
-- 写文件先写 `path + ".tmp"` 再 `os.Rename`，避免写一半损坏原文件。
+- 写文件先写**同目录唯一临时文件**（`os.CreateTemp(dir, ".<name>.*.tmp")`，权限补到
+  0644）再 `os.Rename`，避免写一半损坏原文件；失败时临时文件删掉，成功才替换。
+  归档是**直接流进**这个临时文件的（`zip.NewWriter(tmp)`，逐条 `requests/<id>.json`
+  边编码边写），不在内存里攒一整份 zip——响应示例每条可带 ≤10MiB 的响应体。
+  失败路径先把临时文件关掉再删（Windows 上还开着的文件删不掉）。
+  `writeBand` 另有一把包级互斥锁串行化本进程的写盘：同一路径的两次保存在时间上
+  重叠时不会在临时文件与 rename 上互相踩（Windows 上并发替换同一目标是硬错误）。
+  跨进程（两个应用实例）同路径并发写不在保护范围内。
 
 窗口关闭守卫（backend/close.go）：`Window.OnClose` 里 `force || !dirty` 才放行，
 否则 `PreventDefault()` 并向页面发事件 `workspace:closeRequested`（bool 负载），
@@ -517,6 +555,13 @@ type WorkspaceFile struct {
 H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见结果）；
 `http://` 默认 HTTP/1.1，`APIRequest.HTTP2=true` 时改用
 `golang.org/x/net/http2` 的 `Transport{AllowHTTP: true}` 走 h2c prior-knowledge。
+h2c 经代理时由 `dialViaProxy` 手写 CONNECT：这条隧道握手带 30s 期限（代理可能接了
+连接却一直不回应答），隧道建成后清掉期限，之后的读写交给请求自己的 ctx。
+
+Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport（`sync.Once` 建一次），
+不再每次请求克隆一份 `http.DefaultTransport`——连接池与 TLS 会话因此跨请求复用。
+`Proxy` 仍是 `proxyForRequest` 回调，所以「环境变量优先、系统代理兜底」照旧按请求
+解析，改代理不用重启；`http.Transport` 与 `http2.Transport` 本身并发安全。
 
 窗口：`Title "NetDream"`，1280×800（最小 960×600）。
 
@@ -569,12 +614,28 @@ H2 说明：`https://` 始终经 ALPN 自动协商 HTTP/2（Proto 字段可见�
   `preScript/postScript/vars`；发送返回时 `response.vars` 写回 store（带脚本时无条件下发，
   无脚本时后端原样返回故为空操作）。
 - 工作区脏跟踪：`isWorkspaceDirty()` / `setWorkspaceDirty(dirty)`（置位时同步推送
-  `WorkspaceService.setDirty`，驱动窗口关闭守卫）。置脏：`upsertEntry`、`deleteEntry`、
+  `WorkspaceService.setDirty`，驱动窗口关闭守卫）+ `getWorkspaceRevision()`。
+  **所有置脏都走 `markWorkspaceDirty()`**（推进 revision 再置脏，已经脏的时候也推进，
+  否则保存期间的新改动会被旧的保存当成「没变」）：`upsertEntry`、`deleteEntry`、
   `renameEntry`、`renameWorkspace`、`setVars`（内容真变时）、`addFolder`、`renameFolder`、
-  `deleteFolder`、`moveRequest`（请求树同样随 .band 落盘）；清脏：`loadWorkspace`、
-  `newWorkspace`、保存成功。`loadEntry` 与编辑器字段编辑不置脏。
+  `deleteFolder`、`moveRequest`、`newMarkdownDocument`，以及 **`updateRequest`——当
+  `currentId` 指向已入册条目时**（URL/Header/Body/Markdown/响应示例的编辑都在工作区
+  数据上改东西）；新建且尚未入册的请求（`currentId` 为 null）保持原来「不置脏」的
+  语义。`applyRequest`（载入条目/工作区/本地快照）不走 `updateRequest`，因此载入
+  不会误置脏。清脏都走 `clearWorkspaceDirty()`（`loadWorkspace`、`newWorkspace`，
+  同样推进 revision——之前发起的保存在完成时能认出工作区已经换了）。
+- 工作区身份号：`getWorkspaceGeneration()`，只在 `loadWorkspace` / `newWorkspace`
+  推进，普通编辑不推进。异步回调（脚本信任确认）凭它判断「还是不是当时那份工作区」；
+  不能拿 revision 当身份，敲一个字它就变了。
+- 脚本信任（纯内存、不落盘）：`scriptsTrusted` + `scriptsTrustedInWorkspace()` /
+  `trustWorkspaceScripts()`。初始与 `newWorkspace()` 恒可信（本地会话里的脚本是用户
+  自己写的），`loadWorkspace()` 时 `scriptsTrusted = !workspaceHasScripts()`——打开/
+  拖入的 .band 只要任一条目带前后脚本就先标不可信，等用户在执行前确认（见「工作区
+  （前端）」的脚本信任边界）。
 - `ResponseState` 追加脚本产物（不持久化）：`scriptLogs/scriptTests/preScriptError/postScriptError`。
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
+  快照**不含 `examples`**：响应示例可能带 ≤10MiB 的响应体，一条就能把配额撑满、把快照写坏；
+  示例只随工作区落进 .band。读取仍按旧格式解析——老快照里带着 examples 也认得。
 - 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
   Socket 会话（日志/连接状态）也不持久化。
 - `newRequest(kind)` 按类型重置编辑器；`newMarkdownDocument()` 新建未命名
@@ -636,6 +697,18 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     WS = 发送消息 / 请求头 / 请求参数 / 设置（设置 = 子协议输入框，映射 `socketProtocol`）；
     **Socket.IO = 发送消息 / 事件 / 请求头 / 请求参数 / 设置**（设置 = 客户端版本 +
     握手路径，映射 `socketIOVersion` / `socketIOPath`）；TCP = 发送消息。同样用 tabs.ts。
+    - **编辑器按需加载**：Monaco 与 Vditor 都是首次切到对应页/条目时才 `import()`。
+      `monacoSetup.ts` 导出 `loadMonaco(): Promise<MonacoApi>`，`scriptEditor.ts` 的
+      `ensure()` 第一次被调用才建实例；`markdownEditor.ts` 同样（Vditor 与它的 CSS
+      一起动态加载）。加载失败会清掉缓存的 promise，下次交互可重试。
+    - **加载失败不吞**：宿主里插一块 `.editor-error`（`editor.loadFailed` 文案 +
+      「重试」按钮）并 `console.error` 记一条；点重试重走同一次 ensure，成功后
+      自动清掉提示。Vditor 另有构建超时（watchdog）走 `editor.loadTimeout`。
+    - **Monaco 只打包用得上的部分**：入口是 `monaco-editor/editor/editor.api.js`，
+      加上 `monacoContributions.ts` 里列的 contribution（查找/替换、折叠、多光标、
+      注释、格式化、补全、悬浮、参数提示、括号匹配等）与 JavaScript/TypeScript
+      语言注册；CSS/HTML/JSON 的 worker 与其它语言的语法包都不进产物——因此
+      `.css/.html/.json` 文件没有高亮，其它语言按纯文本显示（脚本只写 JS）。
   - **发送消息页**（socketComposer.ts）：左侧消息模板列表（点击载入编辑器、双击名称
     行内重命名、行尾 × 删除、「+ 新增」把当前编辑器内容存为模板并选中）；右侧编辑器 =
     名称 + 类型下拉（Text/JSON/XML/HTML/Binary，映射 `SavedMessage.msgType`）+
@@ -656,9 +729,32 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   handler 收到 `open` 切到流式视图（展示状态/协议/响应头），收到 `event` 追加事件行；
   点击「停止」调 `channel.close()`（Go 侧 ctx 取消、请求中断），用户主动停止时
   吞掉 Send 返回的取消错误。SSE 视图 = 事件表格（N/ID/事件名/Data）+ 自动滚底 + 停止按钮。
+  - 事件**按帧合并**：`pushStreamEvent` 只入队，`requestAnimationFrame`（没有则 16ms
+    定时器）到期才并进 `runtime.events` 并通知一次——一帧里来几十条事件只画一次。
+    流结束/停止/切请求都走 `updateResponse`，它会**先落地排队的事件**再打补丁，
+    所以最后一帧不会丢。
+  - **保留上限**：最多 5000 条、Data 合计 32MiB，超出从最旧的丢；后台标签页里 rAF
+    暂停，队列本身也按同样上限丢（`updateResponse` 会立刻把它们落地）。
+    界面显示「事件 N 条」+ 丢弃了多少条（橙色提示）。
+  - **事件是增量画的**：`responseView` 用事件序号 `n`（同一条流里连续递增）对齐
+    DOM——条数到顶后长度不再变化，靠 `getStreamRevision()` 知道有新事件；先按
+    `n` 差值删掉头部已被淘汰的行（差值大于现有行数时夹紧，因为排队里被丢掉的事件
+    从未画过），再从数组对应位置追加新行，只更新计数与「已丢弃」文案。整表重画只留给
+    数组被清空/换掉、或序号倒退这种对不上的情况。
   返回后：`response.vars` 写回变量 store（带脚本时无条件下发后端快照）；
   `preScriptError` 非空按失败展示（错误条「预执行脚本出错」，response 置空）；
   脚本日志/测试/错误随响应落 ResponseState。
+- **执行隔离（main.ts 的 `Execution`）**：每次发送建一份不可变身份——执行号、
+  发送时的编辑器对象引用、请求快照（`buildRequest()`，含 vars）、条目快照
+  （`snapshotCurrent()`）、断言快照、是否带脚本。所有异步落点（channel handler、
+  `channel.onclose`、Send 的 resolve/reject）先过 `stillCurrent(execution)`：
+  `inFlight.id === execution.id && getRequest() === execution.editor`（换条目/载入工作区/
+  新建请求都会换掉编辑器对象）。归属不符就整段丢弃——响应、错误、`response.vars`、
+  断言结果都不写进当前编辑器，也**不写任何工作区**（入册已在发送开始时做过）。
+  `syncEditor` 发现编辑器被换掉时解除在途句柄并清空瞬态响应（发送/流式/事件/结果/
+  脚本产物），停止按钮因此只作用于当前编辑器的那次执行（在途旧请求不会被强行取消，
+  只是结果不再回到界面）。发送期间全局仍只允许一次发送；切换条目后允许发下一条，
+  两条执行各自隔离。
 - URL 栏右侧一个「h2c」小复选框（强制 HTTP/2 明文），映射 `APIRequest.http2`。
 - 响应工具栏在状态徽章旁显示协议版本（`response.proto`，如 HTTP/2.0）。
 - Body 类型单选：none / form-data / urlencoded / binary / raw；raw 选中时出现子类型
@@ -703,24 +799,45 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 - state.ts 需导出 `applyRequest(next: RequestState)`：整体替换编辑器状态 +
   syncPathParams + scheduleSave + notify（loadSavedRequest / loadEntry 共用）；kind 切换
   由 main.ts 联动（响应区两组 hidden、页签集、urlBar）并调 socket.ts 的「切换先断开」。
-- 自动入册：一次发送（含报错、手动停止）结束后，当前编辑器快照自动 upsert 进
-  内存工作区；SSE 在拿到响应头（open）时即入册，结束再刷新一次；**WS/TCP/Socket.IO 在
-  connect 的 open 事件时入册，到达 closed（断开、被拒、失败）再刷新一次**——失败也收，与
-  HTTP「无论成败都收」一致；切换 kind / 载入其它条目先断开，那时编辑器 URL 与连接
-  对不上，不会误收。新建请求执行一次后即以自动名出现在列表；**派生新条目规则泛化为：
-  HTTP 比较 method+URL、WS/TCP/Socket.IO 比较 URL——与已入册条目不一致即视为新请求，
-  执行后派生新条目，原条目原样保留**；未变的编辑按 id 原地刷新，**改过名的条目保留别名**。
+- 自动入册：**发送一开始就把发送时的条目快照 `upsertEntry` 一次**（`snapshotCurrent()`
+  与 `buildRequest()` 同时取），之后 open、流事件、完成、失败、手动停止都**不再碰工作区**
+  ——等待期间的编辑由编辑器与保存快照负责，晚到的完成也绝不会覆盖它们，更不会把
+  旧工作区的请求写进后来打开的工作区。预脚本失败也算执行过（与「无论成败都收」
+  一致）；新建请求执行一次后即以自动名出现在列表。**WS/TCP/Socket.IO 在 connect 的
+  open 事件时按当前编辑器入册，到达 closed（断开、被拒、失败）再刷新一次**——失败也收；
+  切换 kind / 载入其它条目先断开，那时编辑器 URL 与连接对不上，不会误收。
+  **派生新条目规则泛化为：HTTP 比较 method+URL、WS/TCP/Socket.IO 比较 URL——与已入册
+  条目不一致即视为新请求，执行后派生新条目，原条目原样保留**；未变的编辑按 id 原地
+  刷新，**改过名的条目保留别名**。
 - 保存流程（main.ts）：内存即真相——「保存」把 `WorkspaceState` 整块
   `{name, entries, folders}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
-  无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示；
-  成功（save/saveAs 两条）清脏。`saveWorkspace` 返回 boolean 供关闭/新建守卫判断
-  「真的保存成功」（saveAs 对话框取消 = false）。
+  无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示。
+  两次保存**串行排队**（`saveChain`），后一次等前一次写完再取快照，连点不会旧数据覆盖新数据。
+  清脏带**版本号守卫**：`performSave` 先 `upsertEntry(snapshotCurrent())`、再记下
+  `getWorkspaceRevision()` 与 `getWorkspaceGeneration()`，写盘返回后只有 revision 没变
+  才 `setWorkspaceDirty(false)` 并返回 true。**revision 变过（期间又改了东西、或工作区
+  已被换掉）时返回 false**：脏状态保留，未保存守卫（关窗 / 打开 / 新建的确认框）因此
+  不会继续，避免把保存期间的新改动丢掉；用户再点一次保存即可（第二次快照已含新改动）。
+  「另存为」的路径回写按 generation 判断（工作区被换掉就不绑到旧文件）。普通保存写盘
+  成功但仍有新改动是正常状态——写进去的是保存开始时的快照。返回值同时给守卫用：
+  saveAs 被取消、写盘失败、revision 变过都是 false。
 - 未保存守卫（components/closeConfirm.ts 通用三键确认框，单例）：脏时弹
   「保存 / 继续不保存 / 取消当前操作」。四个触发点——窗口 X（Go 否决关闭并发
   `workspace:closeRequested` 事件，直接弹框，文案「保存 / 不保存 / 取消」）、
   新建工作区（「保存 / 取消保存 / 取消新建」）、打开 .band、拖入 .band
   （后三个走 main.ts `guardUnsaved`，**文件选定/读取成功后才弹框**；保存成功才继续，
   saveAs 取消则留在应用）。Esc / 点遮罩 = 取消；保存中三键禁用。
+- **脚本信任边界**（不可信 .band 的预脚本能外带数据）：打开的 .band 里的预脚本能读
+  `nd.vars`、请求头、请求体，改写 URL/请求，再由后端附上 Basic/Bearer 发出——一份
+  文件就足以把变量里的凭据送到任意地址。所以 `loadWorkspace` 时 `scriptsTrusted =
+  !workspaceHasScripts()`（**本地恢复的会话与 `newWorkspace` 恒可信**，没有脚本的工作区
+  也不受影响），`send()` 在带脚本的请求真正发出前检查 `scriptsTrustedInWorkspace()`，
+  不可信就只弹 `components/scriptTrust.ts` 的两键框（「信任并运行 / 不运行」，默认焦点
+  在不运行），**不发送**；弹框时记下 `{generation, editor}`，确认时**只有两者都还匹配**
+  才 `trustWorkspaceScripts()` 并重新走一遍 `send()`，否则什么都不做——弹框期间拖入/打开
+  另一份工作区不会被这次确认放过。信任只对本次载入有效：重新打开 .band、拖入另一个
+  或新建工作区都会重置（generation 推进），切换条目也绕不过（逐次发送都校验）。
+  文案在 `dialog.scriptTrust*`（三语）。
 - UI（components/workspaceSidebar.ts）：index.html 结构改为
   `<main id="app">` 两列网格——左 `<aside id="workspace-sidebar">`，原全部内容包进
   `<div id="main-area">`（**原有 id 一律不动**，组件无感）。
@@ -761,6 +878,10 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   （basename 或占位「未选择文件」、完整路径在 title、「选择」按钮经
   `RequestService.pickFile()` 选盘），容器带 `data-file-drop-index` 与 dragover
   高亮（纯视觉反馈）。`FormRow` 带 `kind/filePath`，随 .band 持久化（旧数据按文本行读）。
+  **异步回写守卫**：原生对话框返回是要等的，期间可能切条目/换工作区/删掉那一行，
+  所以两处（form-data 行与 binary 的「选择文件」）都在发起时捕获当前 `RequestState`
+  对象（form-data 还捕获那一行的对象引用），返回后只有两者都还是同一个才写回；
+  对不上就丢弃这次选择。拖入路径是同步写回，不走这条守卫。
 
 ### Markdown 文档
 
@@ -768,7 +889,14 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   .band 的 `requests/<id>.json`、工作区树、改名、删除、拖动；旧归档无该字段读出空串。
 - 编辑器 `components/markdownEditor.ts`（Vditor 4，**ir 即时渲染**默认，工具栏
   可切分屏 / 所见即所得）。实例惰性创建（首次切到文档条目才加载 lute ≈3.6MB），
-  之后常驻；语言切换重建实例，主题切换走 `setTheme`。
+  之后常驻；语言切换重建实例，主题切换走 `setTheme`。Vditor 的 JS 与 CSS 用
+  动态 `import()` 一起加载（`loadVditor()` 缓存同一个 promise，失败清掉以便重试），
+  从没打开过 Markdown 条目的会话不为它付启动开销；20s 没初始化完成就放弃并释放
+  创建闸门（下次切回可重试）。每次创建带一个递增 token：超时、销毁、语言重建都让
+  它作废，迟到的 `after()` 绝不写进当前实例；盒子仍归这次创建时顺手
+  `destroy()` 掉，盒子已经交给更新的实例时只丢弃不 destroy（Vditor 的 `destroy()`
+  会还原「构造它的那个元素」的 innerHTML，做了等于删掉新实例的 DOM）。初始化期间
+  界面语言变了，`after()` 发现语言不一致就丢弃重建。
 - **资源本地化离线可用**：`scripts/prepare-vditor.mjs`（predev/prebuild 自动跑）
   把 node_modules/vditor/dist 里用到的部分（css、emoji 图、i18n、icons、
   highlight.js、lute、mermaid）拷进 `frontend/public/vditor/dist`，初始化 `cdn: "vditor"`；
@@ -824,8 +952,12 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 ### 约定
 
 - 原生 TS + strict（`noUncheckedIndexedAccess`），不引入任何运行时 npm 依赖
-  （例外：`monaco-editor`，预/后执行脚本编辑器；`html-minifier-terser` 仅构建期
-  压缩 HTML，不进产物运行时）。
+  （例外：`monaco-editor`（预/后执行脚本编辑器）与 `vditor`（Markdown 文档），
+  两者都按需 `import()`；`html-minifier-terser` 仅构建期压缩 HTML，不进产物运行时）。
+- 模块级调用 mygo API 前先过 `isMyGo()`（src/runtime.ts）：纯浏览器里没有
+  `globalThis.mygo`，入口模块求值抛错会让入口 chunk 进入 errored 状态，凡是静态
+  `import` 它的动态 chunk 都会在 `import()` 时重抛同一错误——Monaco 曾因此整条
+  懒加载链失败（现在 `events.workspaceCloseRequested.on` 已守卫）。
 - UI 文案多语言（zh-CN 兜底 + en-US + ja），一律走 src/i18n 词典；
   样式按 ApiPost 截图：浅底、圆角卡片、蓝色主色 `#3b82f6`。
 - 生成文件 `src/mygo.ts` 只能通过 `bun run generate` 更新。

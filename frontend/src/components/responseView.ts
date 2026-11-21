@@ -4,6 +4,7 @@ import {
   deleteExample,
   getRequest,
   getResponse,
+  getStreamRevision,
   saveCurrentExample,
   stopStream,
   subscribe,
@@ -33,8 +34,15 @@ interface StreamRefs {
   tbody: HTMLElement;
   scroll: HTMLElement;
   count: HTMLElement;
+  trimmed: HTMLElement;
   placeholder: HTMLElement | null;
+  /** 表里现有行数。 */
   rendered: number;
+  /** 第一行 / 最后一行事件的序号（n），空表为 null。 */
+  firstN: number | null;
+  lastN: number | null;
+  /** 画这些行时已经丢掉了多少条，用来更新「已丢弃」文案。 */
+  dropped: number;
 }
 
 export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElement): () => void {
@@ -47,6 +55,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
   let lastOpen: SSEOpen | null = null;
   let lastStopped = false;
   let lastEventsCount = 0;
+  let lastEventsRevision = getStreamRevision();
   let lastScriptLogs: readonly ScriptLog[] = getResponse().scriptLogs;
   let lastScriptTests: readonly ScriptTest[] = getResponse().scriptTests;
   let lastPreScriptError: string | null = getResponse().preScriptError;
@@ -391,6 +400,13 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     count.textContent = t("response.eventCount", { count: events.length });
 
     meta.append(stateLabel, headersLabel, count);
+    // 超过保留上限时表里只有最近的一段，说清楚被丢掉了多少条。这个元素常驻，
+    // 增量追加时只改文案（不做整表重画）。
+    const trimmed = document.createElement("span");
+    trimmed.className = "stream-trimmed";
+    trimmed.hidden = state.droppedEvents === 0;
+    trimmed.textContent = t("response.eventsTrimmed", { count: state.droppedEvents });
+    meta.append(trimmed);
     root.append(meta);
 
     if (error) {
@@ -433,20 +449,59 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     scroll.append(table);
     root.append(scroll);
 
-    streamRefs = { tbody, scroll, count, placeholder, rendered: events.length };
+    streamRefs = {
+      tbody,
+      scroll,
+      count,
+      trimmed,
+      placeholder,
+      rendered: events.length,
+      firstN: events[0]?.n ?? null,
+      lastN: events[events.length - 1]?.n ?? null,
+      dropped: state.droppedEvents,
+    };
     scroll.scrollTop = scroll.scrollHeight;
     return root;
   }
 
+  // 增量同步：按事件序号 n（同一条流里连续递增）对齐 DOM。先删掉头部已被淘汰的
+  // 行，再从数组里对应位置追加新行——长流到上限后每次都有行进出行，整表重画会
+  // 把几十次追加压成每次全量重建。
   function appendStreamEvents(): void {
     const refs = streamRefs;
     if (refs === null) return;
-    const events = getResponse().events;
-    if (events.length < refs.rendered) {
+    const state = getResponse();
+    const events = state.events;
+    const first = events[0];
+    const last = events[events.length - 1];
+
+    // 数组被清空/换掉：只有本来就是空表且没丢过东西时不用重画。
+    if (first === undefined || last === undefined) {
+      if (refs.rendered > 0 || refs.dropped !== state.droppedEvents) render();
+      return;
+    }
+    // 序号倒退说明这不是这条流的数据（或表里留着别的流），只能整表重画。
+    const stale = refs.firstN === null ? 0 : first.n - refs.firstN;
+    if (stale < 0) {
       render();
       return;
     }
-    for (let index = refs.rendered; index < events.length; index += 1) {
+    // 淘汰可能发生在事件还没渲染之前（排队中被丢），按已有行数封顶。
+    const remove = Math.min(stale, refs.rendered);
+    for (let i = 0; i < remove; i += 1) refs.tbody.firstElementChild?.remove();
+    refs.rendered -= remove;
+    if (refs.rendered === 0) {
+      refs.firstN = null;
+      refs.lastN = null;
+    } else if (refs.firstN !== null) {
+      refs.firstN += remove;
+    }
+
+    // 已有行到 lastN 为止；数组里 n = lastN+1 的那条是续上的第一条。中间可能
+    // 隔着一段「排队中被丢掉、从未渲染」的序号，但它们正好落在追加点上。
+    let index = refs.lastN === null ? 0 : refs.lastN + 1 - first.n;
+    if (index < 0) index = 0;
+    for (; index < events.length; index += 1) {
       const event = events[index];
       if (event === undefined) continue;
       if (refs.placeholder !== null) {
@@ -454,9 +509,15 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
         refs.placeholder = null;
       }
       refs.tbody.append(eventRow(event));
+      if (refs.firstN === null) refs.firstN = event.n;
+      refs.rendered += 1;
+      refs.lastN = event.n;
     }
-    refs.rendered = events.length;
+
+    refs.dropped = state.droppedEvents;
     refs.count.textContent = t("response.eventCount", { count: events.length });
+    refs.trimmed.hidden = state.droppedEvents === 0;
+    refs.trimmed.textContent = t("response.eventsTrimmed", { count: state.droppedEvents });
     refs.scroll.scrollTop = refs.scroll.scrollHeight;
   }
 
@@ -555,7 +616,9 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     const sendingChanged = next.sending !== lastSending;
     const streamingChanged = next.streaming !== lastStreaming;
     const stoppedChanged = next.stopped !== lastStopped;
-    const eventsChanged = next.events.length !== lastEventsCount;
+    const eventsRevision = getStreamRevision();
+    const eventsChanged =
+      next.events.length !== lastEventsCount || eventsRevision !== lastEventsRevision;
     const logsChanged = next.scriptLogs !== lastScriptLogs;
     const testsChanged = next.scriptTests !== lastScriptTests;
     const scriptErrorChanged =
@@ -570,6 +633,7 @@ export function mountResponseView(tabsHost: HTMLElement, contentHost: HTMLElemen
     lastStreaming = next.streaming;
     lastStopped = next.stopped;
     lastEventsCount = next.events.length;
+    lastEventsRevision = eventsRevision;
     lastScriptLogs = next.scriptLogs;
     lastScriptTests = next.scriptTests;
     lastPreScriptError = next.preScriptError;

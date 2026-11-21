@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dop251/goja"
 
@@ -28,6 +29,14 @@ const (
 	// The name a script error is reported under.
 	preScriptKind  = "预执行脚本"
 	postScriptKind = "后执行脚本"
+
+	// A script can log in a loop or test in a loop, and nothing in goja bounds
+	// what it keeps: the run holds what it wrote until the script ends. These cap
+	// what the backend keeps (not the JS heap the script itself uses) — the
+	// oldest lines stay, the rest is dropped and the page is told why.
+	scriptMaxLogs      = 1000
+	scriptMaxTests     = 1000
+	scriptMaxTextBytes = 64 << 10
 )
 
 // scriptOutcome is what one script run leaves behind: the full variable set at
@@ -48,16 +57,41 @@ type scriptRun struct {
 	logs  []ScriptLog
 	tests []ScriptTest
 	api   *ndapi.Run
+	// What the limits above dropped, so the outcome can say so.
+	droppedLogs  int
+	droppedTests int
 }
 
-// Log keeps one console line the script wrote.
+// Log keeps one console line the script wrote, within the retention limits.
 func (run *scriptRun) Log(level, text string, at int64) {
-	run.logs = append(run.logs, ScriptLog{Level: level, Text: text, At: at})
+	if len(run.logs) >= scriptMaxLogs {
+		run.droppedLogs++
+		return
+	}
+	run.logs = append(run.logs, ScriptLog{Level: level, Text: scriptText(text), At: at})
 }
 
-// Test keeps one nd.test result the script recorded.
+// Test keeps one nd.test result the script recorded, within the same limits.
 func (run *scriptRun) Test(name string, pass bool, errText string) {
-	run.tests = append(run.tests, ScriptTest{Name: name, Pass: pass, Error: errText})
+	if len(run.tests) >= scriptMaxTests {
+		run.droppedTests++
+		return
+	}
+	run.tests = append(run.tests, ScriptTest{Name: scriptText(name), Pass: pass, Error: scriptText(errText)})
+}
+
+// scriptText caps one line of what a script reported. The cut follows the byte
+// limit and then steps back to a rune boundary, so the page never gets half a
+// character.
+func scriptText(text string) string {
+	if len(text) <= scriptMaxTextBytes {
+		return text
+	}
+	cut := scriptMaxTextBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // runPreScript runs code against req and vars, then writes the script's edits
@@ -165,21 +199,31 @@ func scriptPairs(list []KeyValue) []ndapi.Pair {
 func (run *scriptRun) execute(ctx context.Context, code string) (err error) {
 	vm := run.vm
 
-	timer := time.AfterFunc(scriptTimeout, func() { vm.Interrupt(scriptTimeoutReason) })
+	// One deadline for both ways a run can stop: the vm interrupt below covers
+	// code that stays in JS, and the same context reaches the Go-side calls
+	// (nd.crypto.pbkdf2) that an interrupt cannot touch.
+	runCtx, cancel := context.WithTimeout(ctx, scriptTimeout)
+	defer cancel()
+	run.api.BindContext(runCtx)
 
 	stop := make(chan struct{})
 	watchdone := make(chan struct{})
 	go func() {
 		defer close(watchdone)
 		select {
-		case <-ctx.Done():
-			vm.Interrupt(scriptCancelReason)
+		case <-runCtx.Done():
+			// A deadline means the script took too long; the parent ending means
+			// the page cancelled it. The message differs, so tell them apart.
+			if ctx.Err() != nil {
+				vm.Interrupt(scriptCancelReason)
+			} else {
+				vm.Interrupt(scriptTimeoutReason)
+			}
 		case <-stop:
 		}
 	}()
 
 	defer func() {
-		timer.Stop()
 		close(stop)
 		<-watchdone
 		vm.ClearInterrupt()
@@ -198,7 +242,27 @@ func (run *scriptRun) execute(ctx context.Context, code string) (err error) {
 
 // outcome pairs the run's logs and tests with a variable set.
 func (run *scriptRun) outcome(vars map[string]string) *scriptOutcome {
-	return &scriptOutcome{vars: vars, logs: run.logs, tests: run.tests}
+	return &scriptOutcome{vars: vars, logs: run.limitedLogs(), tests: run.tests}
+}
+
+// limitedLogs returns the console lines, followed by one warning when a limit
+// dropped something: the page then says why output stops where it does instead
+// of just ending early. The note is a console line rather than a fake nd.test
+// result, which would read as a failed test.
+func (run *scriptRun) limitedLogs() []ScriptLog {
+	if run.droppedLogs == 0 && run.droppedTests == 0 {
+		return run.logs
+	}
+	notes := make([]string, 0, 2)
+	if run.droppedLogs > 0 {
+		notes = append(notes, fmt.Sprintf("console 输出超过 %d 条，其余 %d 条未保留", scriptMaxLogs, run.droppedLogs))
+	}
+	if run.droppedTests > 0 {
+		notes = append(notes, fmt.Sprintf("nd.test 结果超过 %d 条，其余 %d 条未保留", scriptMaxTests, run.droppedTests))
+	}
+	logs := make([]ScriptLog, len(run.logs), len(run.logs)+1)
+	copy(logs, run.logs)
+	return append(logs, ScriptLog{Level: "warn", Text: strings.Join(notes, "；"), At: time.Now().UnixMilli()})
 }
 
 // exportedVars is the variable set the script left behind: whatever is in
@@ -352,6 +416,15 @@ func stringField(v goja.Value) string {
 
 // scriptFailure turns a goja error into the message the page shows.
 func scriptFailure(kind string, err error) error {
+	// A Go-side call that stopped because the run ended reports the same two
+	// messages a vm interrupt does; the run is over either way.
+	var aborted *ndapi.AbortError
+	if errors.As(err, &aborted) {
+		if aborted.Canceled {
+			return fmt.Errorf("%s已取消", kind)
+		}
+		return fmt.Errorf("%s超时：超过 %s 未执行完，已中断", kind, scriptTimeout)
+	}
 	var interrupted *goja.InterruptedError
 	if errors.As(err, &interrupted) {
 		if reason, ok := interrupted.Value().(string); ok && reason == scriptTimeoutReason {

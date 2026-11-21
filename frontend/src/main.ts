@@ -1,5 +1,5 @@
 import { Channel, onFileDrop } from "mygo-runtime";
-import { runAssertions } from "./assert";
+import { runAssertions, type AssertionRule } from "./assert";
 import { mountAssertionsPanel } from "./components/assertionsPanel";
 import { mountAuthEditor } from "./components/authEditor";
 import { mountBodyEditor } from "./components/bodyEditor";
@@ -8,6 +8,7 @@ import { mountKVTable } from "./components/kvTable";
 import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
 import { mountScriptEditor } from "./components/scriptEditor";
+import { mountScriptTrustDialog } from "./components/scriptTrust";
 import { mountSettings } from "./components/settings";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
 import { mountSocketEventsEditor } from "./components/socketEventsEditor";
@@ -16,8 +17,9 @@ import { createTabs, type TabDef } from "./components/tabs";
 import { mountUrlBar } from "./components/urlBar";
 import { mountWorkspaceSidebar } from "./components/workspaceSidebar";
 import { applyStatic, onLangChange, t } from "./i18n";
-import type { SSEMessage } from "./mygo";
+import type { APIRequest, SavedRequest, SSEMessage } from "./mygo";
 import { RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
+import { isMyGo } from "./runtime";
 import {
   connectSocket,
   disconnectSocket,
@@ -35,6 +37,8 @@ import {
   getResponse,
   getVars,
   getWorkspace,
+  getWorkspaceGeneration,
+  getWorkspaceRevision,
   isWorkspaceDirty,
   loadEntry,
   loadSavedRequest,
@@ -47,6 +51,7 @@ import {
   renameEntry,
   renameFolder,
   renameWorkspace,
+  scriptsTrustedInWorkspace,
   setFormFilePath,
   setStreamChannel,
   setVars,
@@ -54,10 +59,12 @@ import {
   setWorkspacePath,
   snapshotCurrent,
   subscribe,
+  trustWorkspaceScripts,
   updateRequest,
   updateResponse,
   upsertEntry,
   type RequestKind,
+  type RequestState,
 } from "./state";
 
 // 页签文案随语言变，所以每次按当前语言现建；id 与顺序是固定的。
@@ -147,18 +154,68 @@ function viewOf(id: string): HTMLElement {
   return view;
 }
 
+// 脚本编辑器的惰性创建表：页签第一次显示时才 ensure（Monaco 很重，见
+// components/scriptEditor.ts）。表先声明，挂载后再填空，避免 showRequestTab 在
+// 编辑器挂载前被调用时踩到未初始化绑定。
+const lazyViews = new Map<string, { ensure: () => void }>();
+
 function showRequestTab(id: string): void {
   for (const [key, view] of views) view.hidden = key !== id;
+  lazyViews.get(id)?.ensure();
 }
 
-// 执行过的请求自动收进内存工作区：新建的请求执行一次后出现在列表里；
-// 已有条目按 id 原地刷新，改名的条目保留别名。成功、出错、手动停止都收。
+// WS/TCP/Socket.IO 的自动入册：连接事件里已经核对过 kind 与 URL，收的就是当前
+// 编辑器里的那条请求。HTTP/SSE 在发送开始时按发送时快照入册（见 send）。
 function rememberCurrentRequest(): void {
   upsertEntry(snapshotCurrent());
 }
 
+/** 一次发送的不可变身份：回调、停止与完成路径都凭它判断结果该不该写进界面。 */
+interface Execution {
+  /** 单调自增的执行号。 */
+  id: number;
+  /** 发送时的编辑器对象；换条目/载入工作区会换掉它（state 的 applyRequest）。 */
+  editor: RequestState;
+  /** 实际发出的请求（含发送时的变量快照）。 */
+  request: APIRequest;
+  /** 发送时的条目快照：自动入册保存它，而不是完成时的编辑器。 */
+  entry: SavedRequest;
+  /** 发送时的断言规则快照：结果按它算，不按完成时的编辑器。 */
+  assertions: AssertionRule[];
+  hasScripts: boolean;
+}
+
+let executionSeq = 0;
+// 当前在途的执行。同一时刻只发一次（发送按钮禁用），但换编辑器时这里会被清空：
+// 上一次执行仍在后端跑完，只是它的结果不再属于任何界面，也不再碰工作区。
+let inFlight: Execution | null = null;
+
+// 结果是否还属于当前界面：执行号仍是当前在途的那次，且编辑器没被换掉（切条目、
+// 载入工作区、新建请求都会换掉编辑器对象）。旧执行的结果一律丢弃，不污染新界面。
+function stillCurrent(execution: Execution): boolean {
+  return inFlight !== null && inFlight.id === execution.id && getRequest() === execution.editor;
+}
+
+// 换编辑器时把上一轮的响应清成初始态：在途的是上一条请求，它的结果不会再来这里。
+function resetResponse(): void {
+  updateResponse({
+    sending: false,
+    streaming: false,
+    open: null,
+    events: [],
+    stopped: false,
+    response: null,
+    error: null,
+    results: [],
+    scriptLogs: [],
+    scriptTests: [],
+    preScriptError: null,
+    postScriptError: null,
+  });
+}
+
 async function send(): Promise<void> {
-  if (getResponse().sending) return;
+  if (inFlight !== null) return;
   // Markdown 条目没有发送语义（顶栏整体隐藏，这里防的是快捷键等旁路入口）。
   if (getRequest().kind === "markdown") return;
   if (getRequest().url.trim() === "") {
@@ -166,18 +223,43 @@ async function send(): Promise<void> {
     return;
   }
 
-  const request = buildRequest();
+  const editor = getRequest();
+  const hasScripts = editor.preScript.trim() !== "" || editor.postScript.trim() !== "";
+  // 打开的 .band 里的脚本能读变量、请求头与请求体，把数据改写进 URL 再由后端
+  // 附加认证发出去：本次载入没确认过信任之前一条都不发。确认后从 send() 重来，
+  // 按当时的编辑器与工作区重新判断（见 pendingTrust）。
+  if (hasScripts && !scriptsTrustedInWorkspace()) {
+    pendingTrust = { generation: getWorkspaceGeneration(), editor };
+    scriptTrustDialog.open();
+    return;
+  }
+
+  const execution: Execution = {
+    id: (executionSeq += 1),
+    editor,
+    request: buildRequest(),
+    entry: snapshotCurrent(),
+    assertions: editor.assertions.map((rule) => ({ ...rule })),
+    hasScripts: editor.preScript !== "" || editor.postScript !== "",
+  };
+
+  // 入册一次就在此刻，之后 open/完成都不再碰工作区：等待期间的编辑由编辑器与
+  // 保存快照负责，后台执行（哪怕用户已经切走）也不会往别的工作区里写东西。
+  // 预脚本失败也算执行过——与「无论成败都收」一致。
+  upsertEntry(execution.entry);
+  inFlight = execution;
+
   const channel = new Channel<SSEMessage>((message) => {
+    if (!stillCurrent(execution)) return;
     if (message.open) {
       updateResponse({ streaming: true, open: message.open, response: null, events: [] });
-      // 执行已确认（拿到响应头），立即把请求收进内存工作区，
-      // 长流不必等到结束才出现在列表里。
-      rememberCurrentRequest();
     } else if (message.event) {
       pushStreamEvent(message.event);
     }
   });
   channel.onclose = () => {
+    // 换条目后旧流关闭不该动新界面的流式状态。
+    if (!stillCurrent(execution)) return;
     if (getResponse().streaming) updateResponse({ streaming: false });
   };
 
@@ -197,12 +279,19 @@ async function send(): Promise<void> {
   });
 
   try {
-    const response = await RequestService.send(request, channel);
-    setStreamChannel(null);
+    const response = await RequestService.send(execution.request, channel);
+    const current = stillCurrent(execution);
+    if (inFlight === execution) {
+      // 通道与在途句柄只在这次执行还占着它们时解绑：别把后一次发送的通道清掉。
+      inFlight = null;
+      setStreamChannel(null);
+    }
+    // 已经切到别的请求（或另一个工作区）：这次执行的结果不进界面，也绝不写工作区
+    // ——它的请求在发送时就已经入册了。
+    if (!current) return;
     // 脚本写回的变量覆盖界面的变量表。后端保证无脚本时原样返回快照，
     // 所以带脚本时无条件下发——脚本删掉全部变量时空对象也要生效。
-    const hadScripts = request.preScript !== "" || request.postScript !== "";
-    if (hadScripts || Object.keys(response.vars).length > 0) setVars(response.vars);
+    if (execution.hasScripts || Object.keys(response.vars).length > 0) setVars(response.vars);
     const script = {
       scriptLogs: response.scriptLogs,
       scriptTests: response.scriptTests,
@@ -225,12 +314,17 @@ async function send(): Promise<void> {
         streaming: false,
         response,
         error: null,
-        results: runAssertions(getRequest().assertions, response),
+        results: runAssertions(execution.assertions, response),
         ...script,
       });
     }
   } catch (error) {
-    setStreamChannel(null);
+    const current = stillCurrent(execution);
+    if (inFlight === execution) {
+      inFlight = null;
+      setStreamChannel(null);
+    }
+    if (!current) return;
     const stopped = getResponse().stopped;
     updateResponse({
       sending: false,
@@ -240,10 +334,6 @@ async function send(): Promise<void> {
       results: [],
     });
   }
-
-  // 无论成败，执行过的请求都已进内存工作区；保存按钮只是把这整块
-  // 内存写进 .band 文件。
-  rememberCurrentRequest();
 }
 
 let workspaceError: string | null = null;
@@ -267,6 +357,22 @@ function workspaceData(): WorkspaceData {
 
 // 三键确认框是单例：对话框已经打开时，任何守卫的新触发都被忽略。
 const confirmDialog = mountConfirmDialog({ save: () => saveWorkspace(false) });
+
+// 脚本信任确认框（见 send）打开时的上下文：确认必须落回同一份工作区（generation）
+// 与同一个编辑器。弹框期间拖入/打开了别的工作区，这次确认直接作废。
+let pendingTrust: { generation: number; editor: RequestState } | null = null;
+
+const scriptTrustDialog = mountScriptTrustDialog({
+  trust: () => {
+    const pending = pendingTrust;
+    pendingTrust = null;
+    if (pending === null) return;
+    if (getWorkspaceGeneration() !== pending.generation || getRequest() !== pending.editor) return;
+    trustWorkspaceScripts();
+    // 信任的判定按当前工作区重算：send() 自己会再过一遍守卫。
+    void send();
+  },
+});
 
 interface UnsavedGuard {
   /** 放弃未保存改动那一键的文案键。 */
@@ -350,8 +456,24 @@ async function openDroppedWorkspace(paths: string[]): Promise<void> {
   }
 }
 
+// 保存队列的尾巴：每次保存排在上一次后面，串行写盘。
+let saveChain: Promise<unknown> = Promise.resolve();
+
 async function saveWorkspace(forceSaveAs: boolean): Promise<boolean> {
+  // 串行化：连点「保存」时后来的一次要等前一次写完再取快照，旧数据不会覆盖新数据。
+  const run = saveChain.then(
+    () => performSave(forceSaveAs),
+    () => performSave(forceSaveAs),
+  );
+  saveChain = run.catch(() => undefined);
+  return run;
+}
+
+async function performSave(forceSaveAs: boolean): Promise<boolean> {
   upsertEntry(snapshotCurrent());
+  // 保存开始时的身份与版本：身份判断「还是不是这份工作区」，版本判断「期间有没有改动」。
+  const generation = getWorkspaceGeneration();
+  const revision = getWorkspaceRevision();
   try {
     const path = getWorkspace().path;
     if (!forceSaveAs && path !== null) {
@@ -360,9 +482,13 @@ async function saveWorkspace(forceSaveAs: boolean): Promise<boolean> {
       const saved = await WorkspaceService.saveAs(workspaceData());
       // 另存为对话框被取消：什么都没写，调用方不能当成已保存。
       if (saved === "") return false;
-      setWorkspacePath(saved);
+      // 对话框开着时工作区被换掉的话，别把新工作区绑到刚写的文件上。
+      if (getWorkspaceGeneration() === generation) setWorkspacePath(saved);
     }
     clearWorkspaceError();
+    // 写盘成功了，但期间又有改动（或工作区已经换掉）：脏状态保留，且这次保存
+    // 不代表「已经把当前状态存好」，守卫不能继续——否则新改动会被关窗/换工作区丢掉。
+    if (getWorkspaceRevision() !== revision) return false;
     setWorkspaceDirty(false);
     return true;
   } catch (error) {
@@ -457,7 +583,7 @@ mountKVTable(viewOf("cookies"), {
   addLabel: () => t("cookies.add"),
 });
 
-mountScriptEditor(
+const preScriptEditor = mountScriptEditor(
   viewOf("pre"),
   () => getRequest().preScript,
   (value) => {
@@ -468,7 +594,7 @@ mountScriptEditor(
   subscribe,
 );
 
-mountScriptEditor(
+const postScriptEditor = mountScriptEditor(
   viewOf("post"),
   () => getRequest().postScript,
   (value) => {
@@ -478,6 +604,9 @@ mountScriptEditor(
   },
   subscribe,
 );
+
+lazyViews.set("pre", preScriptEditor);
+lazyViews.set("post", postScriptEditor);
 
 // Markdown 文档编辑器：实例惰性创建（ensure），内容双向绑定到当前条目的 markdown 字段。
 const markdownEditor = mountMarkdownEditor(
@@ -543,7 +672,17 @@ function syncEditor(): void {
   const request = getRequest();
   const replaced = request !== currentRequest;
   currentRequest = request;
-  if (replaced) stopSocketIfActive();
+  if (replaced) {
+    stopSocketIfActive();
+    // 在途的 HTTP/SSE 请求属于上一个编辑器：断开通道联系后它的回调自行丢弃，
+    // 停止按钮也只作用于当前编辑器的那次执行。后台执行不再碰工作区（请求在
+    // 发送时就入册了），所以晚到的完成既不改界面也不写别的请求/工作区。
+    if (inFlight !== null && inFlight.editor !== request) {
+      inFlight = null;
+      setStreamChannel(null);
+      resetResponse();
+    }
+  }
   if (request.kind === currentKind) return;
   currentKind = request.kind;
   stopSocketIfActive();
@@ -637,13 +776,17 @@ function closeWindow(): void {
 
 // 工作区脏时 Go 否决用户点窗口 X 的关闭并发来这条事件：问是否保存、放弃或返回。
 // 事件本身已经代表「脏」，所以这里直接开框，不再过 guardUnsaved 的脏判断。
-events.workspaceCloseRequested.on(() => {
-  confirmDialog.open({
-    titleKey: "dialog.unsavedTitle",
-    noteKey: "dialog.unsavedNote",
-    saveKey: "dialog.save",
-    discardKey: "dialog.discard",
-    cancelKey: "dialog.cancel",
-    proceed: closeWindow,
+// 纯浏览器里没有 MyGo 运行时，订阅会抛错（并且让入口模块 errored、连带 Monaco 的
+// 动态 chunk 全挂），所以先确认自己在窗口里；桌面端行为不变。
+if (isMyGo()) {
+  events.workspaceCloseRequested.on(() => {
+    confirmDialog.open({
+      titleKey: "dialog.unsavedTitle",
+      noteKey: "dialog.unsavedNote",
+      saveKey: "dialog.save",
+      discardKey: "dialog.discard",
+      cancelKey: "dialog.cancel",
+      proceed: closeWindow,
+    });
   });
-});
+}

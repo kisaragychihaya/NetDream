@@ -40,12 +40,24 @@ func proxyForRequest(req *http.Request) (*url.URL, error) {
 	return systemProxyURL(req), nil
 }
 
-// proxiedTransport clones the default transport and points its proxy lookup
-// at proxyForRequest.
+var (
+	proxiedOnce   sync.Once
+	proxiedShared *http.Transport
+)
+
+// proxiedTransport returns the one transport every request sends through. It
+// clones the default transport once and points its proxy lookup at
+// proxyForRequest, so connections and TLS sessions are reused across requests
+// instead of every request opening its own pool. http.Transport is safe for
+// concurrent use, and the proxy stays a per-request lookup, so a proxy change
+// still takes effect without a restart.
 func proxiedTransport() *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = proxyForRequest
-	return transport
+	proxiedOnce.Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = proxyForRequest
+		proxiedShared = transport
+	})
+	return proxiedShared
 }
 
 // systemProxyURL 把系统代理设置换算成请求的代理 URL；被例外列表或
@@ -191,6 +203,9 @@ func dialViaProxy(network string, proxy *url.URL, addr string) (net.Conn, error)
 	if err != nil {
 		return nil, err
 	}
+	// 代理可以接受连接却一直不回 CONNECT 应答：没有期限的话 h2c 的拨号就
+	// 永远停在这里。握手结束后清掉期限，隧道本身由调用方的 ctx 管。
+	_ = conn.SetDeadline(time.Now().Add(defaultTimeout))
 	connect := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Opaque: addr},
@@ -213,6 +228,11 @@ func dialViaProxy(network string, proxy *url.URL, addr string) (net.Conn, error)
 	if resp.StatusCode != http.StatusOK {
 		conn.Close()
 		return nil, fmt.Errorf("proxy CONNECT to %s failed: %s", addr, resp.Status)
+	}
+	// 隧道已建立：后续读写由调用方的 ctx 负责，别把握手期限留着。
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return nil, err
 	}
 	return conn, nil
 }

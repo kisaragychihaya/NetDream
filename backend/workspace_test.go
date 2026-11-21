@@ -4,11 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -275,4 +278,84 @@ func readFileBytes(t *testing.T, path string) []byte {
 		t.Fatalf("reading %s failed: %v", path, err)
 	}
 	return body
+}
+
+// 同一路径的多次保存同时进行：由 writeBand 串行化，各写各的临时文件。
+// Windows 上并发 rename 可能被外部程序（杀毒、索引服务）短暂挡住，单次保存
+// 因此失败属于平台噪声——失败时目标文件保持原样，正是原子替换要保证的。
+// 这里只断言真正重要的不变量：留下的是一份完整归档，没有半截临时文件。
+func TestWriteBandConcurrentSaves(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "race.band")
+	const writers = 6
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for n := 0; n < writers; n++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			data := WorkspaceData{
+				Name:     fmt.Sprintf("并发 %d", n),
+				Requests: []SavedRequest{testRequest(fmt.Sprintf("r%d", n), "请求")},
+				Vars:     map[string]string{"writer": strconv.Itoa(n)},
+			}
+			if err := writeBand(path, data); err != nil {
+				errs <- err
+			}
+		}(n)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Logf("a concurrent save did not land: %v", err)
+	}
+
+	got, err := readBand(path)
+	if err != nil {
+		t.Fatalf("the archive left behind is not readable: %v", err)
+	}
+	if len(got.Requests) != 1 {
+		t.Fatalf("requests = %d, want the 1 of one whole archive", len(got.Requests))
+	}
+	if got.Vars["writer"] == "" {
+		t.Fatalf("vars = %#v, want the variables of one whole archive", got.Vars)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s failed: %v", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(path) {
+			t.Fatalf("a save left %s behind", entry.Name())
+		}
+	}
+}
+
+// 替换已经存在的归档：写第二遍不留临时文件，读回来的是新的那份。
+func TestWriteBandReplacesExistingArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "again.band")
+	if err := writeBand(path, WorkspaceData{Name: "第一版", Requests: []SavedRequest{testRequest("r1", "一")}}); err != nil {
+		t.Fatalf("first writeBand failed: %v", err)
+	}
+	if err := writeBand(path, WorkspaceData{Name: "第二版", Requests: []SavedRequest{testRequest("r2", "二")}}); err != nil {
+		t.Fatalf("second writeBand failed: %v", err)
+	}
+
+	got, err := readBand(path)
+	if err != nil {
+		t.Fatalf("readBand failed: %v", err)
+	}
+	if got.Name != "第二版" || len(got.Requests) != 1 || got.Requests[0].ID != "r2" {
+		t.Fatalf("archive after the second save = %#v, want the second workspace", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s failed: %v", dir, err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "again.band" {
+		t.Fatalf("directory after two saves = %v, want only again.band", entries)
+	}
 }

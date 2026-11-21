@@ -1,7 +1,7 @@
 package ndapi
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,20 +25,52 @@ type Recorder interface {
 // the caller owns the runtime and its lifetime.
 type Run struct {
 	vm      *goja.Runtime
-	body    string // nd.request.body as injected, to tell an edit from the original
+	ctx     context.Context // the run's lifetime, for calls Go runs on its own
+	body    string          // nd.request.body as injected, to tell an edit from the original
 	vars    *goja.Object
 	request *goja.Object
 	report  Recorder
 }
 
 // NewRun builds the ND API state of one run on vm: nd.vars holds vars as it came
-// in, and everything the script records goes to report.
+// in, and everything the script records goes to report. The run is unbounded
+// until BindContext gives it a lifetime.
 func NewRun(vm *goja.Runtime, vars map[string]string, report Recorder) *Run {
-	run := &Run{vm: vm, report: report, vars: vm.NewObject()}
+	run := &Run{vm: vm, report: report, vars: vm.NewObject(), ctx: context.Background()}
 	for k, v := range vars {
 		_ = run.vars.Set(k, v)
 	}
 	return run
+}
+
+// BindContext gives the run its lifetime. A JS interrupt only reaches the
+// runtime when control is back in JS, so a call that burns its time inside Go
+// (nd.crypto.pbkdf2) has to look at this context itself instead of waiting for
+// one. Call it before running the script, from the goroutine that owns vm.
+func (run *Run) BindContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	run.ctx = ctx
+}
+
+// AbortError is what such a call raises when the run's context ended before it
+// finished: the page cancelled the run, or it ran past its deadline. The app
+// turns it into the message it already shows for an interrupted run.
+type AbortError struct {
+	Canceled bool // cancelled by the page, rather than out of time
+}
+
+func (e *AbortError) Error() string {
+	if e.Canceled {
+		return "the run was cancelled"
+	}
+	return "the run timed out"
+}
+
+// abort reports why run.ctx ended, as the error a long call raises.
+func (run *Run) abort() *AbortError {
+	return &AbortError{Canceled: errors.Is(run.ctx.Err(), context.Canceled)}
 }
 
 // ExportedVars reads the variable object back into a plain map: whatever the
@@ -132,21 +164,17 @@ func (run *Run) ResponseGlobal(resp *Response) *goja.Object {
 	parse := vm.Get("JSON").ToObject(vm).Get("parse")
 	body := resp.Body
 	_ = obj.Set("json", func(goja.FunctionCall) goja.Value {
-		// Go parses first only for the message: JSON.parse then hands back
-		// real JS values, so arrays keep their methods.
-		var scratch any
-		if err := json.Unmarshal([]byte(body), &scratch); err != nil {
-			panic(run.newError("nd.response.json(): " + err.Error()))
-		}
 		call, ok := goja.AssertFunction(parse)
 		if !ok {
-			return vm.ToValue(scratch)
+			panic(run.newError("nd.response.json(): JSON.parse is not available"))
 		}
+		// 只解析一次，而且就在 JS 里解析：结果是真正的 JS 值（数组有 map 等方法），
+		// 也不必先在 Go 里过一遍 JSON 只为拼错误消息。
 		value, err := call(goja.Undefined(), vm.ToValue(body))
 		if err != nil {
 			var interrupted *goja.InterruptedError
 			if errors.As(err, &interrupted) {
-				panic(interrupted)
+				panic(interrupted) // 中断要走中断路径，别包成普通 Error
 			}
 			panic(run.newError("nd.response.json(): " + ScriptErrorText(err)))
 		}

@@ -4,11 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/egoist/mygo"
 )
@@ -23,6 +25,22 @@ const (
 	bandRequestsDir = "requests/"
 	bandExt         = ".band"
 )
+
+// A .band is untrusted input: nothing stops a hand-made archive from carrying a
+// file that unpacks to gigabytes. The limits below leave room for the largest
+// thing this app writes (a 10 MiB response body, a Markdown document) with room
+// to spare, and are enforced on what the archive actually unpacks to, not on the
+// sizes it claims.
+const (
+	bandMaxArchiveSize = 128 << 20 // the .band file itself
+	bandMaxEntrySize   = 32 << 20  // workspace.json, vars.json, or one request
+	bandMaxTotalSize   = 256 << 20 // everything the archive unpacks to
+)
+
+// errBandLimit marks an archive over those limits. Unlike one unreadable
+// request, an over-limit archive fails as a whole: silently skipping what is
+// too big would drop data the user believes is saved.
+var errBandLimit = errors.New("the workspace archive is over its size limits")
 
 // bandMeta is workspace.json: what the archive is, not what it holds.
 type bandMeta struct {
@@ -119,11 +137,68 @@ func (WorkspaceService) CloseWindow() {
 
 // readBand reads the workspace an archive holds.
 func readBand(path string) (WorkspaceData, error) {
+	name := filepath.Base(path)
+	// Stat before ReadFile: a hand-made .band can be larger than the memory
+	// this app is willing to spend on opening it.
+	info, err := os.Stat(path)
+	if err != nil {
+		return WorkspaceData{}, fmt.Errorf("opening %s failed: %w", name, err)
+	}
+	if info.Size() > bandMaxArchiveSize {
+		return WorkspaceData{}, fmt.Errorf("%w: %s is %d MiB, the limit is %d MiB", errBandLimit, name, info.Size()>>20, bandMaxArchiveSize>>20)
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return WorkspaceData{}, fmt.Errorf("opening %s failed: %w", filepath.Base(path), err)
+		return WorkspaceData{}, fmt.Errorf("opening %s failed: %w", name, err)
 	}
-	return readBandBytes(body, filepath.Base(path))
+	return readBandBytes(body, name)
+}
+
+// bandBudget reads archive entries while holding the cumulative limit: every
+// entry is capped, and so is what all of them add up to. name is what its errors
+// call the archive; the limits are fields so a test can use small ones.
+type bandBudget struct {
+	name     string
+	maxEntry int64
+	maxTotal int64
+	total    int64
+}
+
+// newBandBudget starts a read against the real limits.
+func newBandBudget(name string) *bandBudget {
+	return &bandBudget{name: name, maxEntry: bandMaxEntrySize, maxTotal: bandMaxTotalSize}
+}
+
+// read unpacks one entry. A breach of either limit reports errBandLimit, which
+// readBandBytes treats as fatal rather than as a broken entry.
+func (b *bandBudget) read(entry *zip.File) ([]byte, error) {
+	if entry.UncompressedSize64 > uint64(b.maxEntry) {
+		return nil, fmt.Errorf("%s: %w: %s unpacks to %d MiB, one entry may not exceed %d MiB",
+			b.name, errBandLimit, entry.Name, entry.UncompressedSize64>>20, b.maxEntry>>20)
+	}
+	r, err := entry.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	// The declared size above is what the archive claims; read one byte past the
+	// limit to find out what it really is, since a hand-made header can say
+	// anything.
+	body, err := io.ReadAll(io.LimitReader(r, b.maxEntry+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > b.maxEntry {
+		return nil, fmt.Errorf("%s: %w: %s unpacks to more than %d MiB",
+			b.name, errBandLimit, entry.Name, b.maxEntry>>20)
+	}
+	b.total += int64(len(body))
+	if b.total > b.maxTotal {
+		return nil, fmt.Errorf("%s: %w: its entries unpack to more than %d MiB in total",
+			b.name, errBandLimit, b.maxTotal>>20)
+	}
+	return body, nil
 }
 
 // readBandBytes parses the .band archive in body: name is what errors call it.
@@ -139,11 +214,15 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 		vars    map[string]string
 	)
 	requests := make([]SavedRequest, 0, len(zr.File))
+	budget := newBandBudget(name)
 	for _, entry := range zr.File {
 		switch {
 		case entry.Name == bandMetaEntry:
-			entryBody, err := readZipEntry(entry)
+			entryBody, err := budget.read(entry)
 			if err != nil {
+				if errors.Is(err, errBandLimit) {
+					return WorkspaceData{}, err
+				}
 				return WorkspaceData{}, fmt.Errorf("reading %s of %s failed: %w", bandMetaEntry, name, err)
 			}
 			if err := json.Unmarshal(entryBody, &meta); err != nil {
@@ -152,9 +231,13 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 			hasMeta = true
 		case entry.Name == bandVarsEntry:
 			// A vars.json that does not parse leaves the workspace with no
-			// variables, like an unreadable request is skipped.
-			entryBody, err := readZipEntry(entry)
+			// variables, like an unreadable request is skipped. An archive over
+			// its limits is another matter: see the error below.
+			entryBody, err := budget.read(entry)
 			if err != nil {
+				if errors.Is(err, errBandLimit) {
+					return WorkspaceData{}, err
+				}
 				continue
 			}
 			var stored map[string]string
@@ -163,8 +246,11 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 			}
 			vars = stored
 		case isRequestEntry(entry.Name):
-			entryBody, err := readZipEntry(entry)
+			entryBody, err := budget.read(entry)
 			if err != nil {
+				if errors.Is(err, errBandLimit) {
+					return WorkspaceData{}, err
+				}
 				continue // one unreadable request does not sink the workspace
 			}
 			var req SavedRequest
@@ -260,12 +346,59 @@ func normalizeFolderRequests(ids []string, known, placed map[string]bool) []stri
 	return out
 }
 
+// bandWriteMu 串行化本进程里的工作区写盘：同一路径的两次保存否则会在临时文件
+// 和 rename 上互相踩（Windows 上并发替换同一目标会直接 EBUSY/拒绝访问）。
+// 保存是低频的用户动作，一把锁比按路径维护锁表划算。
+var bandWriteMu sync.Mutex
+
 // writeBand writes data to path as a .band archive, replacing what is there
 // only once the whole archive is on disk.
 func writeBand(path string, data WorkspaceData) error {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
+	bandWriteMu.Lock()
+	defer bandWriteMu.Unlock()
 
+	// 临时文件与目标同目录、名字唯一：同一路径的两次保存在时间上重叠也不会互相
+	// 踩掉（原来共用 path+".tmp"）。写完再 rename，替换仍然是原子的。
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("writing %s failed: %w", filepath.Base(path), err)
+	}
+	tmpName := tmp.Name()
+	done := false
+	defer func() {
+		// 失败路径上文件可能还开着：Windows 上开着的文件删不掉，先关再删。
+		tmp.Close()
+		if !done {
+			os.Remove(tmpName) // 替换成功之前失败：别留下半截临时文件
+		}
+	}()
+
+	// 归档直接流进临时文件，不再先在内存里攒出一整份：响应示例每条能带 10MiB
+	// 的响应体，几百条请求的工作区攒成一块就会把进程内存顶上去。
+	zw := zip.NewWriter(tmp)
+	if err := writeBandEntries(zw, data); err != nil {
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("writing the workspace archive failed: %w", err)
+	}
+	// os.CreateTemp 建的是 0600，写出来的归档保持原来直接写的可读权限。
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("writing %s failed: %w", filepath.Base(path), err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing %s failed: %w", filepath.Base(path), err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replacing %s failed: %w", filepath.Base(path), err)
+	}
+	done = true
+	return nil
+}
+
+// writeBandEntries encodes the workspace into zw: metadata, variables, then one
+// entry per request.
+func writeBandEntries(zw *zip.Writer, data WorkspaceData) error {
 	// folders 总是写（空也写）：旧归档里留着上一份树的话，页面清空分组后
 	// 那些文件夹会再冒出来。
 	folders := data.Folders
@@ -305,18 +438,6 @@ func writeBand(path string, data WorkspaceData) error {
 			return err
 		}
 	}
-	if err := zw.Close(); err != nil {
-		return fmt.Errorf("writing the workspace archive failed: %w", err)
-	}
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("writing %s failed: %w", filepath.Base(path), err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("replacing %s failed: %w", filepath.Base(path), err)
-	}
 	return nil
 }
 
@@ -326,16 +447,6 @@ func isRequestEntry(name string) bool {
 	return strings.HasPrefix(name, bandRequestsDir) &&
 		strings.HasSuffix(name, ".json") &&
 		!strings.HasSuffix(name, "/")
-}
-
-// readZipEntry reads one entry of an archive.
-func readZipEntry(entry *zip.File) ([]byte, error) {
-	r, err := entry.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	return io.ReadAll(r)
 }
 
 // addZipEntry writes one entry of an archive.

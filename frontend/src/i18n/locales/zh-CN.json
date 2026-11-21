@@ -166,6 +166,7 @@
     "exampleEmpty": "暂无响应示例：在「实时响应」点保存图标即可添加",
     "exampleDelete": "删除响应示例",
     "eventCount": "事件 {{count}} 条",
+    "eventsTrimmed": "超出上限，已丢弃最早的 {{count}} 条",
     "columnEvent": "事件",
     "waitingEvents": "等待事件…",
     "noEvents": "没有接收到事件",
@@ -298,6 +299,11 @@
     "versionUnknown": "未知",
     "github": "GitHub"
   },
+  "editor": {
+    "loadFailed": "编辑器加载失败：{{error}}",
+    "loadTimeout": "编辑器加载超时",
+    "retry": "重试"
+  },
   "markdown": {
     "placeholder": "输入 Markdown 内容，工具栏可切换编辑模式…",
     "namePlaceholder": "文档名称（留空显示「未命名文档」）",
@@ -313,6 +319,10 @@
     "cancel": "取消",
     "cancelSave": "取消保存",
     "cancelNew": "取消新建",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "scriptTrustTitle": "运行这个工作区的脚本？",
+    "scriptTrustNote": "「{{file}}」里的请求带有预执行或后执行脚本。脚本能读取变量、请求头和请求体，能改写 URL 与请求内容，也能把读到的数据发到任意地址；只有你信任这个 .band 文件的来源时才运行。确认只对这次打开有效：重新打开这个文件或换一个工作区都会再问一次。",
+    "scriptTrustRun": "信任并运行",
+    "scriptTrustCancel": "不运行"
   }
 }

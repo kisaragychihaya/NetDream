@@ -37,6 +37,7 @@ type socketConn struct {
 	mu      sync.Mutex
 	ws      *websocket.Conn
 	tcp     net.Conn
+	raw     net.Conn   // the transport the WebSocket dial produced, before the handshake
 	headers []KeyValue // the WebSocket handshake response headers
 	shut    bool       // closed by Disconnect or by Connect's return
 	sio     *sioState  // socketio only: the session the handshake built
@@ -73,6 +74,16 @@ func Connect(ctx context.Context, params ConnectParams, sink Sink) error {
 		conn.stop()
 	}()
 
+	// Closing the transport is what ends ReadMessage and Read: cancelling the
+	// context alone would leave them waiting on a socket nobody reads. The
+	// dialer honours the context itself, so this also covers a cancel that
+	// arrives mid-handshake (stop then closes whatever the dial produced).
+	stopOnCancel := context.AfterFunc(ctx, conn.stop)
+	// Runs before the deferred stop above, so the callback is gone by the time
+	// Connect returns; a callback already in flight is harmless, since stop is
+	// idempotent.
+	defer stopOnCancel()
+
 	var code int
 	var err error
 	switch kind {
@@ -84,7 +95,12 @@ func Connect(ctx context.Context, params ConnectParams, sink Sink) error {
 		err = conn.dialTCP(ctx, params)
 	}
 	if err != nil {
-		if ctx.Err() == nil && !conn.isShut() {
+		// A cancel is the reason this failed, not the transport it closed:
+		// report it as such instead of an unexplained connection reset.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !conn.isShut() {
 			_ = conn.sink.Send(SocketEvent{Type: "error", Code: code, Reason: err.Error(), At: time.Now().UnixMilli()})
 		}
 		return err
@@ -147,6 +163,22 @@ func (c *socketConn) dialWebSocket(ctx context.Context, params ConnectParams) (i
 	}
 
 	header, dialer := socketDialer(params)
+	// stop has to reach the socket even before a WebSocket exists: the dial's
+	// context only covers the TCP connect, and the handshake read is bounded by
+	// HandshakeTimeout alone, so a cancel mid-handshake would otherwise wait it
+	// out. Closing the transport is what makes that read fail.
+	dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := (&net.Dialer{Timeout: socketDialTimeout}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if !c.attachRaw(raw) {
+			// stop ran while this dial was in flight: nothing can make progress.
+			_ = raw.Close()
+			return nil, net.ErrClosed
+		}
+		return raw, nil
+	}
 	ws, resp, err := dialer.DialContext(ctx, target, header)
 	if err != nil {
 		if resp != nil {
@@ -187,6 +219,19 @@ func socketDialer(params ConnectParams) (http.Header, websocket.Dialer) {
 		dialer.Subprotocols = protocols
 	}
 	return header, dialer
+}
+
+// attachRaw hands stop the transport the dial produced, so a cancel during the
+// WebSocket handshake still closes it. It reports false when stop already ran,
+// in which case the caller closes the transport itself.
+func (c *socketConn) attachRaw(raw net.Conn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shut {
+		return false
+	}
+	c.raw = raw
+	return true
 }
 
 // dialTCP opens the TCP connection the page's host:port names.
@@ -329,7 +374,7 @@ func (c *socketConn) stop() {
 	c.mu.Lock()
 	first := !c.shut
 	c.shut = true
-	ws, tcp := c.ws, c.tcp
+	ws, tcp, raw := c.ws, c.tcp, c.raw
 	if first && ws != nil && c.sio != nil {
 		if c.sio.connected {
 			// Socket.IO says goodbye with its own DISCONNECT packet, and the
@@ -352,6 +397,9 @@ func (c *socketConn) stop() {
 	}
 	if tcp != nil {
 		_ = tcp.Close()
+	}
+	if raw != nil {
+		_ = raw.Close()
 	}
 	c.cancel()
 }

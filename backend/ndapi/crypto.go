@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -299,7 +300,12 @@ func (run *Run) CryptoGlobal() *goja.Object {
 			algo = strings.ToLower(text)
 		}
 		newHash, _ := run.cryptoHashByName(name, algo)
-		derived := pbkdf2Derive([]byte(password), []byte(salt), iterations, keyLen, newHash)
+		derived, err := pbkdf2Derive(run.ctx, []byte(password), []byte(salt), iterations, keyLen, newHash)
+		if err != nil {
+			// 一次纯粹花在 Go 里的运算：只能在这里停下，按 vm 中断的同一套
+			// 消息（超时/取消）结束这次执行。
+			panic(run.abort())
+		}
 		return vm.ToValue(base64.StdEncoding.EncodeToString(derived))
 	})
 
@@ -810,14 +816,29 @@ func (run *Run) rsaPublicKey(name, text string) *rsa.PublicKey {
 	return key
 }
 
+// pbkdf2Batch is how many hash rounds run between two context checks: often
+// enough to stop promptly once the run ends, rare enough that the check costs
+// nothing next to the hashing around it.
+const pbkdf2Batch = 256
+
 // pbkdf2Derive derives a key per RFC 2898 using only the standard library; it is
-// the same construction golang.org/x/crypto/pbkdf2 implements.
-func pbkdf2Derive(password, salt []byte, iterations, keyLen int, newHash func() hash.Hash) []byte {
+// the same construction golang.org/x/crypto/pbkdf2 implements. It is the one call
+// in this package that can burn seconds inside Go, where a vm interrupt cannot
+// reach it, so it watches ctx and returns its error instead of finishing.
+func pbkdf2Derive(ctx context.Context, password, salt []byte, iterations, keyLen int, newHash func() hash.Hash) ([]byte, error) {
 	mac := hmac.New(newHash, password)
 	hashLen := mac.Size()
 	blocks := (keyLen + hashLen - 1) / hashLen
 	derived := make([]byte, 0, blocks*hashLen)
 	u := make([]byte, hashLen)
+	aborted := func() error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
 	for block := 1; block <= blocks; block++ {
 		mac.Reset()
 		_, _ = mac.Write(salt)
@@ -825,6 +846,11 @@ func pbkdf2Derive(password, salt []byte, iterations, keyLen int, newHash func() 
 		u = mac.Sum(u[:0])
 		t := bytes.Clone(u)
 		for n := 2; n <= iterations; n++ {
+			if n%pbkdf2Batch == 0 {
+				if err := aborted(); err != nil {
+					return nil, err
+				}
+			}
 			mac.Reset()
 			_, _ = mac.Write(u)
 			u = mac.Sum(u[:0])
@@ -834,7 +860,11 @@ func pbkdf2Derive(password, salt []byte, iterations, keyLen int, newHash func() 
 		}
 		derived = append(derived, t...)
 	}
-	return derived[:keyLen]
+	// The last batch may be shorter than pbkdf2Batch, so check once at the end too.
+	if err := aborted(); err != nil {
+		return nil, err
+	}
+	return derived[:keyLen], nil
 }
 
 // jwtSign signs the signing input for one of the supported JWT algorithms. HS*

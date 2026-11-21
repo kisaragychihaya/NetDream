@@ -166,6 +166,7 @@
     "exampleEmpty": "レスポンス例はまだありません:「リアルタイムレスポンス」の保存アイコンで追加",
     "exampleDelete": "レスポンス例を削除",
     "eventCount": "イベント {{count}} 件",
+    "eventsTrimmed": "上限を超えたため古い {{count}} 件を破棄",
     "columnEvent": "イベント",
     "waitingEvents": "イベントを待機中…",
     "noEvents": "イベントを受信していません",
@@ -298,6 +299,11 @@
     "versionUnknown": "不明",
     "github": "GitHub"
   },
+  "editor": {
+    "loadFailed": "エディタの読み込みに失敗しました: {{error}}",
+    "loadTimeout": "エディタの読み込みがタイムアウトしました",
+    "retry": "再試行"
+  },
   "markdown": {
     "placeholder": "Markdown を入力（ツールバーで編集モードを切り替えられます）…",
     "namePlaceholder": "ドキュメント名（空欄は「無題のドキュメント」）",
@@ -313,6 +319,10 @@
     "cancel": "キャンセル",
     "cancelSave": "保存をキャンセル",
     "cancelNew": "新規作成をキャンセル",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "scriptTrustTitle": "このワークスペースのスクリプトを実行しますか？",
+    "scriptTrustNote": "「{{file}}」のリクエストには実行前スクリプトまたは実行後スクリプトが含まれています。スクリプトは変数・リクエストヘッダー・リクエストボディを読み取り、URL やリクエスト内容を書き換え、読み取ったデータを任意の宛先へ送信できます。この .band ファイルの入手元を信頼できる場合にのみ実行してください。確認は今回の読み込み限りで、ファイルを開き直すときや別のワークスペースを開くときは再び確認します。",
+    "scriptTrustRun": "信頼して実行",
+    "scriptTrustCancel": "実行しない"
   }
 }

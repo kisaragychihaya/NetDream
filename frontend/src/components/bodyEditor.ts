@@ -43,11 +43,17 @@ function rawPlaceholder(type: RawType): string {
 
 // form-data 文件字段的「选择」与 binary 共用同一个原生对话框：拿到非空路径就
 // 写回对应行；取消（空串）什么都不做。拖入的路径由 main.ts 的 onFileDrop 走同一条写回。
+// 对话框是异步的：期间切了条目、换了工作区或删掉/挪动了那一行，路径就不再属于
+// 发起选择时的那处，直接丢掉——只写回同一份编辑器里的同一个行对象。
 async function pickFormFile(index: number): Promise<void> {
+  const editor = getRequest();
+  const row = editor.formData[index];
   try {
     const picked = await RequestService.pickFile();
-    if (picked !== "") setFormFilePath(index, picked);
+    if (picked === "" || getRequest() !== editor || editor.formData[index] !== row) return;
+    setFormFilePath(index, picked);
   } catch (error) {
+    if (getRequest() !== editor) return;
     updateResponse({ error: error instanceof Error ? error.message : String(error) });
   }
 }
@@ -215,17 +221,19 @@ export function mountBodyEditor(host: HTMLElement): () => void {
         syncBinary();
 
         pick.addEventListener("click", async () => {
+          // 与 form-data 同理：对话框开着时换了条目/工作区，路径属于发起选择
+          // 的那份编辑器，别写到现在显示的这一份上。
+          const editor = getRequest();
           error.hidden = true;
           pick.disabled = true;
           try {
             const picked = await RequestService.pickFile();
-            if (picked !== "") {
-              updateRequest((value) => {
-                value.binaryPath = picked;
-              });
-            }
+            if (picked === "" || getRequest() !== editor) return;
+            updateRequest((value) => {
+              value.binaryPath = picked;
+            });
           } catch (err) {
-            if (!pick.isConnected) return;
+            if (!pick.isConnected || getRequest() !== editor) return;
             error.textContent = err instanceof Error ? err.message : String(err);
             error.hidden = false;
           } finally {

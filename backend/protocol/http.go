@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -186,21 +187,30 @@ func methodOf(method string) string {
 	return method
 }
 
+var (
+	h2cOnce   sync.Once
+	h2cShared *http2.Transport
+)
+
 // h2cTransport speaks HTTP/2 to a plain-text server with prior knowledge, for
-// the http:// requests the page marks as h2c.
+// the http:// requests the page marks as h2c. One transport serves every such
+// request: it pools connections itself and is safe for concurrent use.
 func h2cTransport() *http2.Transport {
-	return &http2.Transport{
-		AllowHTTP: true,
-		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
-			// 配了 http(s) 代理（环境变量或系统代理）时先 CONNECT 开隧道，
-			// 再在隧道里讲 h2c；socks 代理没有 CONNECT 语义，保持直连。
-			if proxy := proxyForSchemeHost("http", addr); proxy != nil &&
-				(proxy.Scheme == "http" || proxy.Scheme == "https") {
-				return dialViaProxy(network, proxy, addr)
-			}
-			return net.DialTimeout(network, addr, defaultTimeout)
-		},
-	}
+	h2cOnce.Do(func() {
+		h2cShared = &http2.Transport{
+			AllowHTTP: true,
+			DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
+				// 配了 http(s) 代理（环境变量或系统代理）时先 CONNECT 开隧道，
+				// 再在隧道里讲 h2c；socks 代理没有 CONNECT 语义，保持直连。
+				if proxy := proxyForSchemeHost("http", addr); proxy != nil &&
+					(proxy.Scheme == "http" || proxy.Scheme == "https") {
+					return dialViaProxy(network, proxy, addr)
+				}
+				return net.DialTimeout(network, addr, defaultTimeout)
+			},
+		}
+	})
+	return h2cShared
 }
 
 // buildBody turns the request's body type into a body, the Content-Type it

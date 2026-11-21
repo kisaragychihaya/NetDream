@@ -15,6 +15,11 @@ import (
 // that sends more than this is not speaking events we can parse.
 const maxSSELineBytes = 1 << 20
 
+// maxSSEEventBytes caps the data one event may accumulate. A single event can
+// span as many data lines as the server likes, so the line limit alone would
+// let one event grow until the page runs out of memory; this bounds it.
+const maxSSEEventBytes = 10 << 20
+
 // isEventStream reports whether the response headers announce an event stream.
 func isEventStream(h http.Header) bool {
 	mediaType, _, err := mime.ParseMediaType(h.Get("Content-Type"))
@@ -69,10 +74,11 @@ func parseSSE(body io.Reader, emit func(SSEEvent) error) error {
 	reader := bufio.NewReaderSize(body, maxSSELineBytes)
 
 	var (
-		data  []string
-		id    string
-		event string
-		n     int
+		data    []string
+		dataLen int
+		id      string
+		event   string
+		n       int
 	)
 
 	dispatch := func() error {
@@ -85,6 +91,7 @@ func parseSSE(body io.Reader, emit func(SSEEvent) error) error {
 			next.Event = "message"
 		}
 		data = data[:0]
+		dataLen = 0
 		id, event = "", ""
 		return emit(next)
 	}
@@ -112,6 +119,10 @@ func parseSSE(body io.Reader, emit func(SSEEvent) error) error {
 			}
 			switch field {
 			case "data":
+				dataLen += len(value) + 1
+				if dataLen > maxSSEEventBytes {
+					return fmt.Errorf("event stream event is larger than %d MiB", maxSSEEventBytes>>20)
+				}
 				data = append(data, value)
 			case "event":
 				event = value

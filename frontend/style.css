@@ -1217,6 +1217,10 @@ button:disabled {
   background: var(--muted);
 }
 
+.stream-trimmed {
+  color: var(--orange);
+}
+
 .stream-scroll {
   padding: 0 0 12px;
 }
@@ -2176,6 +2180,41 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+}
+
+/* 编辑器加载失败的提示（Monaco / Vditor 共用）：一条原因 + 重试按钮。 */
+.editor-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.editor-error-text {
+  margin: 0;
+  color: var(--fg);
+  word-break: break-word;
+}
+
+.editor-error-retry {
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.editor-error-retry:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ---- Markdown 文档编辑器 ---- */

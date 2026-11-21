@@ -166,6 +166,7 @@
     "exampleEmpty": "No response example yet: click the save icon in \"Live response\" to add one",
     "exampleDelete": "Delete response example",
     "eventCount": "{{count}} events",
+    "eventsTrimmed": "Over the limit: dropped the oldest {{count}}",
     "columnEvent": "Event",
     "waitingEvents": "Waiting for events…",
     "noEvents": "No events received",
@@ -298,6 +299,11 @@
     "versionUnknown": "Unknown",
     "github": "GitHub"
   },
+  "editor": {
+    "loadFailed": "The editor failed to load: {{error}}",
+    "loadTimeout": "The editor took too long to load",
+    "retry": "Retry"
+  },
   "markdown": {
     "placeholder": "Enter Markdown content; the toolbar can switch edit modes...",
     "namePlaceholder": "Document name (empty shows \"Untitled Document\")",
@@ -313,6 +319,10 @@
     "cancel": "Cancel",
     "cancelSave": "Cancel Save",
     "cancelNew": "Cancel New",
-    "saving": "Saving…"
+    "saving": "Saving…",
+    "scriptTrustTitle": "Run this workspace's scripts?",
+    "scriptTrustNote": "Requests in \"{{file}}\" carry pre-request or post-response scripts. A script can read variables, request headers and the request body, rewrite the URL and the request, and send what it read to any address. Run them only if you trust where this .band file came from. This confirmation covers this one load: reopening the file or opening another workspace asks again.",
+    "scriptTrustRun": "Trust and Run",
+    "scriptTrustCancel": "Don't Run"
   }
 }

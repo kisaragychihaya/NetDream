@@ -111,6 +111,8 @@ export interface ResponseState {
   streaming: boolean;
   open: SSEOpen | null;
   events: SSEEvent[];
+  /** 事件超过保留上限时被丢掉的条数；0 = 一条没丢。 */
+  droppedEvents: number;
   stopped: boolean;
   response: APIResponse | null;
   error: string | null;
@@ -185,6 +187,7 @@ const runtime: ResponseState = {
   streaming: false,
   open: null,
   events: [],
+  droppedEvents: 0,
   stopped: false,
   response: null,
   error: null,
@@ -220,8 +223,19 @@ function notify(): void {
 export function updateRequest(mutate?: (state: RequestState) => void): void {
   mutate?.(request);
   syncPathParams();
+  // 改的是已入册条目的字段（URL/头/体/Markdown/响应示例…）：这就是在工作区数据上
+  // 改东西，保存守卫与在途保存都要看得见。还没入册的新请求保持原语义——
+  // 执行过一次、进了列表之后才开始算改动。
+  if (currentEntryRegistered()) markWorkspaceDirty();
   scheduleSave();
   notify();
+}
+
+// 当前编辑器对应的是不是工作区里已存在的条目：新请求（currentId 为 null）与
+// 已入册后又派生（尚未 upsert）的情况都算「还没入册」。
+function currentEntryRegistered(): boolean {
+  const id = workspace.currentId;
+  return id !== null && workspace.entries.some((entry) => entry.id === id);
 }
 
 // form-data 的文件行路径由拖拽落点路由到这里（见 main.ts 的 onFileDrop）。
@@ -238,13 +252,22 @@ export function setFormFilePath(index: number, path: string): void {
 }
 
 export function updateResponse(patch: Partial<ResponseState>): void {
+  // 先把排队的事件落地：清空、结束流、换请求这些补丁之后，界面看到的条数
+  // 才是完整的（否则最后一帧的事件会被下一次 updateResponse 覆盖掉）。
+  applyPendingEvents();
   Object.assign(runtime, patch);
+  if (patch.events !== undefined) {
+    // 换了一组事件（开流、重置、切请求）：字节预算与丢弃计数跟着重来。
+    eventsBytes = dataBytes(patch.events);
+    if (patch.events.length === 0) runtime.droppedEvents = 0;
+  }
   notify();
 }
 
 /**
  * 把当前响应存为响应示例（新示例覆盖旧的一条——列表结构为将来多示例扩展预留）。
- * 示例是编辑器状态的一部分，随保存/发送快照进 .band；与请求字段同理，编辑本身不置脏。
+ * 示例是编辑器状态的一部分，随保存/发送快照进 .band；它走 updateRequest，所以和
+ * 请求字段一样：改的是已入册条目就算工作区改动，未入册的新请求仍不置脏。
  */
 export function saveCurrentExample(): void {
   const response = getResponse().response;
@@ -283,10 +306,114 @@ export function stopStream(): void {
   channel.close();
 }
 
+// 流式事件在内存里只留最近的这么多：一条长流可以推几万条，界面撑不住。
+const MAX_STREAM_EVENTS = 5000;
+// Data 总量上限：条数相同的事件体积可能相差几个量级，单独再卡一道。
+const MAX_STREAM_DATA_BYTES = 32 << 20;
+
+// 排队中的事件：一帧内到的事件合成一次通知。逐条 notify 会把渲染压在同一帧
+// 里排队几十次，而每条事件本身只该算一次 DOM 追加。
+let pendingEvents: SSEEvent[] = [];
+let pendingBytes = 0;
+// runtime.events 里 Data 的总字节数，淘汰时靠它判断要不要继续丢。
+let eventsBytes = 0;
+// 每次事件落地递增：条数到达上限后长度不再变化，界面靠它知道有新事件。
+let streamRevision = 0;
+let flushHandle: number | null = null;
+let flushByFrame = false;
+
+/** 事件落地了多少次；界面用它判断「有新事件」，条数到顶时也成立。 */
+export function getStreamRevision(): number {
+  return streamRevision;
+}
+
+function dataBytes(events: SSEEvent[]): number {
+  let total = 0;
+  for (const event of events) total += event.data.length;
+  return total;
+}
+
+function cancelFlush(): void {
+  if (flushHandle === null) return;
+  // rAF 与定时器的编号是两套，不能拿一个去取消另一个。
+  if (flushByFrame) {
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(flushHandle);
+  } else {
+    window.clearTimeout(flushHandle);
+  }
+  flushHandle = null;
+}
+
+function scheduleFlush(): void {
+  if (flushHandle !== null) return;
+  const run = () => {
+    flushHandle = null;
+    flushStreamEvents();
+  };
+  // 有 rAF 就按帧合；只有完全没有 rAF 的环境才退到 16ms 定时器。后台标签页里
+  // rAF 会暂停，事件就留在队列里等下一帧——队列自己有上限，而且结束流、停止、
+  // 任何 updateResponse 都会立刻把它们落地，所以这里不另加定时器。
+  if (typeof requestAnimationFrame === "function") {
+    flushByFrame = true;
+    flushHandle = requestAnimationFrame(run);
+  } else {
+    flushByFrame = false;
+    flushHandle = window.setTimeout(run, 16);
+  }
+}
+
+// applyPendingEvents 把排队的事件并进 runtime.events 并按上限淘汰，返回是否
+// 有变化；它不通知订阅者，好让 updateResponse 把补丁和这批事件一起通知一次。
+function applyPendingEvents(): boolean {
+  cancelFlush();
+  if (pendingEvents.length === 0) return false;
+  const incoming = pendingEvents;
+  pendingEvents = [];
+  pendingBytes = 0;
+  const events = runtime.events;
+  for (const event of incoming) {
+    events.push(event);
+    eventsBytes += event.data.length;
+  }
+  trimEvents(events);
+  streamRevision += 1;
+  return true;
+}
+
+// trimEvents 从最旧的开始丢，直到条数与字节数都回到上限以内。
+function trimEvents(events: SSEEvent[]): void {
+  let drop = 0;
+  while (
+    drop < events.length &&
+    (events.length - drop > MAX_STREAM_EVENTS || eventsBytes > MAX_STREAM_DATA_BYTES)
+  ) {
+    const event = events[drop];
+    if (event !== undefined) eventsBytes -= event.data.length;
+    drop += 1;
+  }
+  if (drop === 0) return;
+  events.splice(0, drop);
+  runtime.droppedEvents += drop;
+}
+
+/** 立刻把排队的事件落地并通知一次；合帧到期与 updateResponse 都走它。 */
+function flushStreamEvents(): void {
+  if (applyPendingEvents()) notify();
+}
+
 // Events are pushed into the live array: a long stream must not copy it per event.
+// 它们先进队列，同一帧里的多条并成一次通知与一次 DOM 追加。
 export function pushStreamEvent(event: SSEEvent): void {
-  runtime.events.push(event);
-  notify();
+  pendingEvents.push(event);
+  pendingBytes += event.data.length;
+  // 后台标签页里 rAF 不跑，排队的事件同样要有上限，否则长流会把内存堆满。
+  while (pendingEvents.length > MAX_STREAM_EVENTS || pendingBytes > MAX_STREAM_DATA_BYTES) {
+    const dropped = pendingEvents.shift();
+    if (dropped === undefined) break;
+    pendingBytes -= dropped.data.length;
+    runtime.droppedEvents += 1;
+  }
+  scheduleFlush();
 }
 
 let saveTimer: number | undefined;
@@ -301,7 +428,11 @@ function scheduleSave(): void {
 
 function save(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(request));
+    // 响应示例里的响应体可能有 10MiB，只属于工作区里的请求条目：不进
+    // localStorage 预览快照，否则一条示例就可能撑满配额、把快照写坏。
+    // 读的时候仍按旧格式解析（老快照里的 examples 照样认得）。
+    const { examples: _examples, ...snapshot } = request;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
   } catch {
     // Storage can be disabled or full; the page keeps working without it.
   }
@@ -313,8 +444,17 @@ function save(): void {
 // Go 侧凭这个状态决定用户点窗口 X 时是直接关窗还是先问页面。
 let workspaceDirty = false;
 
+// 工作区版本号：每次改动与每次清脏都推进。保存开始时记下它，写完时只有
+// 版本没变才清脏——保存期间又改了东西，工作区仍然算脏。
+let workspaceRevision = 0;
+
 export function isWorkspaceDirty(): boolean {
   return workspaceDirty;
+}
+
+/** 当前工作区版本号：保存流程凭它判断这期间有没有新的改动。 */
+export function getWorkspaceRevision(): number {
+  return workspaceRevision;
 }
 
 export function setWorkspaceDirty(dirty: boolean): void {
@@ -323,6 +463,25 @@ export function setWorkspaceDirty(dirty: boolean): void {
   void WorkspaceService.setDirty(dirty).catch(() => {
     // 推给 Go 只影响关窗时的询问，推送失败不影响页面内的状态。
   });
+}
+
+/**
+ * 记一次改动：推进版本号并置脏。
+ * 已经脏的时候 setWorkspaceDirty(true) 是空操作，版本号仍要涨，
+ * 否则保存期间的新改动会被旧的保存当成「没变」而清脏。
+ */
+function markWorkspaceDirty(): void {
+  workspaceRevision += 1;
+  setWorkspaceDirty(true);
+}
+
+/**
+ * 载入/新建工作区后的清脏：版本号同样推进，让之前发起的保存在完成时
+ * 认出「工作区已经换了」而不去动新工作区的脏状态。
+ */
+function clearWorkspaceDirty(): void {
+  workspaceRevision += 1;
+  setWorkspaceDirty(false);
 }
 
 /* ---- 变量（工作区的一部分，随 .band 落盘） ---- */
@@ -337,7 +496,7 @@ export function getVars(): Record<string, string> {
 export function setVars(next: Record<string, string>): void {
   const changed = !sameVars(vars, next);
   replaceVars(next);
-  if (changed) setWorkspaceDirty(true);
+  if (changed) markWorkspaceDirty();
 }
 
 export function updateVars(mutate: (next: Record<string, string>) => void): void {
@@ -718,7 +877,41 @@ function requestFromSaved(saved: SavedRequest): RequestState {
   };
 }
 
+/* ---- 工作区脚本信任 ---- */
+
+// 打开的 .band 里的预脚本能读变量、请求头与请求体，改写 URL 之后由后端附加认证
+// 发出去——一份文件就能把用户的数据送走。信任是「本次载入」的内存状态：
+// 本地恢复的会话与新建工作区默认可信，只有打开/拖入的 .band 要先问用户。
+let scriptsTrusted = true;
+
+// 工作区身份号：只在载入/新建时推进，普通编辑不推进（不能拿 revision 当身份，
+// 敲一个字它就变了）。异步回调凭它判断「工作区还是不是当时那一份」。
+let workspaceGeneration = 0;
+
+/** 当前工作区的身份号：载入/新建工作区各推进一次。 */
+export function getWorkspaceGeneration(): number {
+  return workspaceGeneration;
+}
+
+/** 工作区里是否有任何条目带前后脚本。 */
+function workspaceHasScripts(): boolean {
+  return workspace.entries.some(
+    (entry) => entry.preScript.trim() !== "" || entry.postScript.trim() !== "",
+  );
+}
+
+/** 本次载入的工作区里，脚本能否直接运行。 */
+export function scriptsTrustedInWorkspace(): boolean {
+  return scriptsTrusted;
+}
+
+/** 用户确认信任本次载入的工作区脚本；重新打开 .band 或换工作区会重新问。 */
+export function trustWorkspaceScripts(): void {
+  scriptsTrusted = true;
+}
+
 export function loadWorkspace(file: WorkspaceFile): void {
+  workspaceGeneration += 1;
   workspace.name = text(file.data.name);
   workspace.path = text(file.path) || null;
   workspace.entries = file.data.requests;
@@ -726,31 +919,37 @@ export function loadWorkspace(file: WorkspaceFile): void {
   workspace.folders = file.data.folders;
   // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
   replaceVars(hydrateVars(file.data.vars));
+  // 打开的 .band 里的脚本不可信：第一次要执行脚本前先问用户（见 trustWorkspaceScripts）。
+  // 没有脚本的工作区照旧直接可用，不增加任何摩擦。
+  scriptsTrusted = !workspaceHasScripts();
   const first = workspace.entries[0];
   if (first === undefined) {
     workspace.currentId = null;
-    setWorkspaceDirty(false);
+    clearWorkspaceDirty();
     notify();
     return;
   }
   workspace.currentId = first.id;
   applyRequest(requestFromSaved(first));
-  setWorkspaceDirty(false);
+  clearWorkspaceDirty();
 }
 
 // 新建空工作区：条目与变量清空、回到一条空请求，且这里的一切都不算改动
 // （脏状态最后统一清掉，否则换变量/换编辑器时的 notify 会把它又点起来）。
 export function newWorkspace(): void {
+  workspaceGeneration += 1;
   workspace.name = "";
   workspace.path = null;
   workspace.entries = [];
   workspace.folders = [];
   workspace.currentId = null;
+  // 新工作区里的脚本都是用户自己写的：没有不可信来源，不必再问。
+  scriptsTrusted = true;
   // 变量跟着工作区走，新工作区从空变量开始；走不置脏的安静路径。
   replaceVars({});
   // 空工作区没有条目可载入，编辑器回落到一条空 HTTP 请求（同 newRequest 语义）。
   applyRequest(defaultRequest());
-  setWorkspaceDirty(false);
+  clearWorkspaceDirty();
   notify();
 }
 
@@ -796,7 +995,7 @@ export function newMarkdownDocument(): void {
   workspace.entries = [...workspace.entries, entry];
   workspace.currentId = entry.id;
   applyRequest(requestFromSaved(entry));
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
 }
 
 export function loadEntry(id: string): void {
@@ -815,7 +1014,7 @@ export function deleteEntry(id: string): void {
     if (folder.requests.includes(id)) folder.requests = folder.requests.filter((item) => item !== id);
   }
   if (workspace.currentId === id) workspace.currentId = null;
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -823,7 +1022,7 @@ export function renameEntry(id: string, name: string): void {
   const entry = workspace.entries.find((item) => item.id === id);
   if (entry === undefined || entry.name === name) return;
   entry.name = name;
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -843,7 +1042,7 @@ export function renameCurrentMarkdown(name: string): void {
 export function renameWorkspace(name: string): void {
   if (workspace.name === name) return;
   workspace.name = name;
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -853,12 +1052,17 @@ export function setWorkspacePath(path: string): void {
   notify();
 }
 
-export function upsertEntry(entry: SavedRequest): void {
+/**
+ * 把一条请求快照写进内存工作区（已有同 id 的原地替换）。
+ * focus 决定要不要把它变成「当前条目」：后台执行完的那次发送不该把列表里的
+ * 当前条目从用户正在看的请求上抢走；用户还在那条请求上时才需要认领。
+ */
+export function upsertEntry(entry: SavedRequest, focus = true): void {
   const index = workspace.entries.findIndex((item) => item.id === entry.id);
   if (index < 0) workspace.entries = [...workspace.entries, entry];
   else workspace.entries[index] = entry;
-  workspace.currentId = entry.id;
-  setWorkspaceDirty(true);
+  if (focus) workspace.currentId = entry.id;
+  markWorkspaceDirty();
   notify();
 }
 
@@ -875,7 +1079,7 @@ export function addFolder(parentId: string | null): void {
     ...workspace.folders,
     { id: newId(), name: "", parentId: parent?.id ?? "", requests: [] },
   ];
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -883,7 +1087,7 @@ export function renameFolder(id: string, name: string): void {
   const folder = workspace.folders.find((item) => item.id === id);
   if (folder === undefined || folder.name === name) return;
   folder.name = name;
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -898,7 +1102,7 @@ export function deleteFolder(id: string): void {
     if (child.parentId === id) child.parentId = parent?.id ?? "";
   }
   workspace.folders = workspace.folders.filter((item) => item.id !== id);
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 
@@ -918,7 +1122,7 @@ export function moveRequest(requestId: string, folderId: string | null): void {
     changed = true;
   }
   if (!changed) return;
-  setWorkspaceDirty(true);
+  markWorkspaceDirty();
   notify();
 }
 

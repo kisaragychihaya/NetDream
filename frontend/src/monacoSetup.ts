@@ -1,6 +1,12 @@
-import * as monaco from "monaco-editor";
+// 脚本编辑器只在用户第一次切到「预执行 / 后执行」页签时才需要：Monaco 编辑器本体、
+// 语言服务与 contribution 全部走动态 import（`loadMonaco`），启动时主包不再带上它们。
+// 只引入脚本编辑真正用到的部分：`editor.api`（编辑器本体 + languages 注册表），
+// JavaScript 语法与语言服务（ts worker 提供补全、悬浮、诊断、格式化），以及一份
+// 精选的编辑器 contribution。原先的 `import * as monaco from "monaco-editor"`
+// 会把全部语言、css/html/json 语言服务与它们的 worker 一起打进构建。
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import TypeScriptWorker from "monaco-editor/language/typescript/ts.worker.js?worker";
+
 import { getEffectiveTheme, onThemeChange } from "./theme";
 
 // 补全与悬浮文档的数据源：在后端 goja 里运行时的同名 API（见 docs/architecture.md）。
@@ -259,24 +265,58 @@ interface ND {
 declare const nd: ND;
 `;
 
-const environment = {
-  getWorker(_workerId: string, label: string): Worker {
-    // javascript 标签也交给 ts worker：它同时提供 JS 的补全与校验。
-    return label === "typescript" || label === "javascript" ? new TypeScriptWorker() : new EditorWorker();
-  },
-};
+type MonacoApi = typeof import("monaco-editor/editor/editor.api.js");
 
-(self as unknown as { MonacoEnvironment: typeof environment }).MonacoEnvironment = environment;
+export type { MonacoApi };
 
-const typescript = monaco.typescript;
-typescript.javascriptDefaults.setCompilerOptions({
-  target: typescript.ScriptTarget.ES2020,
-  allowJs: true,
-  allowNonTsExtensions: true,
-  checkJs: false,
-  noEmit: true,
-});
-typescript.javascriptDefaults.addExtraLib(ND_API_DTS, "netdream-nd.d.ts");
+let monacoApi: MonacoApi | null = null;
+let loading: Promise<MonacoApi> | null = null;
+
+/**
+ * 加载 Monaco（编辑器本体 + JS 语言服务 + 用到的 contribution）。
+ * 第一次调用才真正拉包；连续 ensure 共用同一次加载；失败后清掉缓存，
+ * 下次切到脚本页签还能重试。
+ */
+export function loadMonaco(): Promise<MonacoApi> {
+  if (monacoApi !== null) return Promise.resolve(monacoApi);
+  loading ??= (async () => {
+    // worker 标签：javascript 也交给 ts worker，它同时提供 JS 的补全与校验。
+    const environment = {
+      getWorker(_workerId: string, label: string): Worker {
+        return label === "typescript" || label === "javascript" ? new TypeScriptWorker() : new EditorWorker();
+      },
+    };
+    (self as unknown as { MonacoEnvironment: typeof environment }).MonacoEnvironment = environment;
+
+    const api = await import("monaco-editor/editor/editor.api.js");
+    // 语言服务声明装在 languages/features/typescript/register.js，
+    // language/typescript/monaco.contribution.js 只是它的再导出（那一层没有类型
+    // 声明，所以直接从有 d.ts 的路径拿 javascriptDefaults / ScriptTarget）。
+    // contribution 与 JS 语法高亮都在 monacoContributions 里一起拉。
+    const [, typescript] = await Promise.all([
+      import("./monacoContributions"),
+      import("monaco-editor/languages/features/typescript/register.js"),
+    ]);
+
+    typescript.javascriptDefaults.setCompilerOptions({
+      target: typescript.ScriptTarget.ES2020,
+      allowJs: true,
+      allowNonTsExtensions: true,
+      checkJs: false,
+      noEmit: true,
+    });
+    typescript.javascriptDefaults.addExtraLib(ND_API_DTS, "netdream-nd.d.ts");
+
+    api.editor.setTheme(monacoTheme());
+    monacoApi = api;
+    return api;
+  })();
+  return loading.catch((error: unknown) => {
+    // 加载失败（构建缺 chunk 等）：下次 ensure 重试，别把失败永久缓存。
+    loading = null;
+    throw error;
+  });
+}
 
 /**
  * 编辑器主题跟着界面主题走：Monaco 画在 canvas 上，CSS 变量管不到它，
@@ -286,9 +326,8 @@ export function monacoTheme(): "vs" | "vs-dark" {
   return getEffectiveTheme() === "dark" ? "vs-dark" : "vs";
 }
 
-// 已经创建的编辑器实例由 monaco.editor.setTheme 统一切换。
+// 已经创建的编辑器实例由 monaco.editor.setTheme 统一切换；还没加载时什么都不用做，
+// loadMonaco 会在创建前按当时的主题设好。
 onThemeChange(() => {
-  monaco.editor.setTheme(monacoTheme());
+  monacoApi?.editor.setTheme(monacoTheme());
 });
-
-export { monaco };
