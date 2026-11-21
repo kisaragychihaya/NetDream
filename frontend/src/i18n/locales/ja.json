@@ -353,6 +353,7 @@
     "bandTrustFingerprint": "フィンガープリント",
     "bandTrustOnce": "今回のみ信頼",
     "bandTrustAlways": "公開鍵を信頼",
+    "bandTrustVerifyHint": "上の ID とメールアドレスは相手の自称です。身分を証明できるのはフィンガープリントだけです。「コピー」で全文を取得し、対面・電話など別の経路で照合してから信頼するか決めてください。",
     "saveOptionsTitle": "ワークスペースを保存",
     "saveEncrypt": "暗号化して保存",
     "saveRecipients": "受信者",

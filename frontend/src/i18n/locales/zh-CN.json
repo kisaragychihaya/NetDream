@@ -353,6 +353,7 @@
     "bandTrustFingerprint": "指纹",
     "bandTrustOnce": "信任一次",
     "bandTrustAlways": "信任公钥",
+    "bandTrustVerifyHint": "上面的 ID 和邮箱都是对方自称的，只有指纹能证明身份。请点「复制」取得完整指纹，与签发者通过其他渠道（当面、电话等）核对之后，再决定是否信任。",
     "saveOptionsTitle": "保存工作区",
     "saveEncrypt": "加密保存",
     "saveRecipients": "收件人",

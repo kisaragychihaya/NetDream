@@ -30,8 +30,38 @@ export interface BandTrustDialog {
   isOpen: () => boolean;
 }
 
-// 指纹很长，界面上只取前 16 位（与文档一致）；完整值仍由 resolve 回给后端。
+// 指纹很长，界面上只取前 16 位（与文档一致）；完整值仍由 resolve 回给后端，
+// 也能经「复制」整串贴给签发者核对。
 const FINGERPRINT_DISPLAY_LENGTH = 16;
+
+// 复制指纹：navigator.clipboard 在 webview 里偶尔不可用（没有聚焦、权限被拒），
+// 退回选中文本 + execCommand（与设置页复制公钥同一套兜底）。
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return copyWithSelection(text);
+  }
+}
+
+function copyWithSelection(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.top = "-1000px";
+  area.style.left = "-1000px";
+  document.body.append(area);
+  area.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    area.remove();
+  }
+}
 
 export function mountBandTrustDialog(handlers: BandTrustDialogHandlers): BandTrustDialog {
   const overlay = document.createElement("div");
@@ -67,7 +97,18 @@ export function mountBandTrustDialog(handlers: BandTrustDialogHandlers): BandTru
   const idValue = addRow("dialog.bandTrustId");
   const emailValue = addRow("dialog.bandTrustEmail");
   const fingerprintValue = addRow("dialog.bandTrustFingerprint");
-  fingerprintValue.classList.add("mono");
+  fingerprintValue.classList.add("band-trust-fingerprint");
+  const fingerprintText = document.createElement("span");
+  fingerprintText.classList.add("mono");
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "identity-btn";
+  fingerprintValue.append(fingerprintText, copyButton);
+
+  // 防中间人的核心提示：id / 邮箱是自称的，唯一可信的是指纹，而指纹要经别的
+  // 渠道核对过才谈得上「信任公钥」。
+  const verifyHint = document.createElement("p");
+  verifyHint.className = "close-confirm-hint";
 
   const actions = document.createElement("div");
   actions.className = "close-confirm-actions";
@@ -84,12 +125,13 @@ export function mountBandTrustDialog(handlers: BandTrustDialogHandlers): BandTru
   const alwaysButton = makeButton();
   const onceButton = makeButton(true);
 
-  card.append(title, note, meta, actions);
+  card.append(title, note, meta, verifyHint, actions);
   overlay.append(card);
   document.body.append(overlay);
 
   let shown = false;
   let prompt: TrustPrompt | null = null;
+  let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   const fileName = (path: string): string => {
     const base = path.split(/[\\/]/).pop() ?? "";
@@ -99,18 +141,23 @@ export function mountBandTrustDialog(handlers: BandTrustDialogHandlers): BandTru
   const applyLabels = (): void => {
     title.textContent = t("dialog.bandTrustTitle");
     note.textContent = t("dialog.bandTrustNote", { file: fileName(prompt?.path ?? "") });
+    verifyHint.textContent = t("dialog.bandTrustVerifyHint");
     onceButton.textContent = t("dialog.bandTrustOnce");
     alwaysButton.textContent = t("dialog.bandTrustAlways");
     cancelButton.textContent = t("dialog.cancel");
+    // 复制反馈中途切语言会覆盖临时文案，回到常态文案即可。
+    if (copyTimer === null) {
+      copyButton.textContent = t("common.copy");
+      copyButton.title = t("common.copy");
+    }
   };
 
   const fillPrompt = (next: TrustPrompt): void => {
     idValue.textContent = next.id;
     emailValue.textContent = next.email;
-    // 指纹前 16 位；等宽字体便于逐字核对（样式在 dd 上的 .mono）。
-    fingerprintValue.textContent = next.fingerprint.slice(0, FINGERPRINT_DISPLAY_LENGTH);
-    // 完整指纹放 title 里：需要贴给别人核对时不用去翻文件。
-    fingerprintValue.title = next.fingerprint;
+    // 指纹前 16 位；等宽字体便于逐字核对。完整指纹在悬停提示与「复制」里。
+    fingerprintText.textContent = next.fingerprint.slice(0, FINGERPRINT_DISPLAY_LENGTH);
+    fingerprintText.title = next.fingerprint;
   };
 
   const hide = (): void => {
@@ -147,6 +194,21 @@ export function mountBandTrustDialog(handlers: BandTrustDialogHandlers): BandTru
   cancelButton.addEventListener("click", () => dismiss());
   alwaysButton.addEventListener("click", () => resolve(true));
   onceButton.addEventListener("click", () => resolve(false));
+
+  // 复制完整指纹：贴给签发者走别的渠道核对。
+  copyButton.addEventListener("click", () => {
+    const fingerprint = prompt?.fingerprint ?? "";
+    if (fingerprint === "") return;
+    void (async () => {
+      const ok = await copyText(fingerprint);
+      if (copyTimer !== null) clearTimeout(copyTimer);
+      copyButton.textContent = ok ? t("common.copied") : t("common.copyFailed");
+      copyTimer = setTimeout(() => {
+        copyButton.textContent = t("common.copy");
+        copyTimer = null;
+      }, 1600);
+    })();
+  });
 
   // 弹窗开着时切语言：标题、说明与按钮跟着换；签发者信息是数据，不动。
   onLangChange(() => {

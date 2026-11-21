@@ -2720,6 +2720,14 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+/* 指纹行：文本 + 复制按钮同一行，窄了再折行。 */
+.band-trust-fingerprint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .mono {
   font-family: var(--mono);
 }

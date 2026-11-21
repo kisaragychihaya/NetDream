@@ -353,6 +353,7 @@
     "bandTrustFingerprint": "Fingerprint",
     "bandTrustOnce": "Trust once",
     "bandTrustAlways": "Trust public key",
+    "bandTrustVerifyHint": "The ID and email above are self-claimed; only the fingerprint proves identity. Click \"Copy\" to get the full fingerprint and verify it with the signer through another channel (in person, by phone, etc.) before trusting.",
     "saveOptionsTitle": "Save workspace",
     "saveEncrypt": "Encrypt",
     "saveRecipients": "Recipients",
