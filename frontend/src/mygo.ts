@@ -373,6 +373,12 @@ export interface WorkspaceFile {
    * 「沿用原收件人」。v1 与明文 v2 恒为 false。
    */
   encrypted: boolean;
+  /**
+   * SignatureTrusted 为 true 表示这是带有效签名的 v2 容器，且签名者在载入时已
+   * 获得信任（持久信任或「信任一次」都算）——脚本无需再过脚本信任弹窗。
+   * v1 与未签名 v2 恒为 false，弹窗照旧。
+   */
+  signatureTrusted: boolean;
 }
 
 /**

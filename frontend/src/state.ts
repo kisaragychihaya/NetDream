@@ -946,8 +946,9 @@ export function loadWorkspace(file: WorkspaceFile): void {
   // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
   replaceVars(hydrateVars(file.data.vars));
   // 打开的 .band 里的脚本不可信：第一次要执行脚本前先问用户（见 trustWorkspaceScripts）。
-  // 没有脚本的工作区照旧直接可用，不增加任何摩擦。
-  scriptsTrusted = !workspaceHasScripts();
+  // 例外：v2 已验签且签名者已获信任（含「信任一次」）的工作区——身份已经密码学
+  // 确认过，脚本直接放行。没有脚本的工作区照旧直接可用，不增加任何摩擦。
+  scriptsTrusted = !workspaceHasScripts() || file.signatureTrusted === true;
   const first = workspace.entries[0];
   if (first === undefined) {
     workspace.currentId = null;

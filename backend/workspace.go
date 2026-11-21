@@ -125,7 +125,7 @@ func openWorkspace(path string) (WorkspaceOpen, error) {
 	if err != nil {
 		return WorkspaceOpen{}, err
 	}
-	return WorkspaceOpen{File: &WorkspaceFile{Path: path, Data: data, Encrypted: read.header.Encrypted}}, nil
+	return WorkspaceOpen{File: &WorkspaceFile{Path: path, Data: data, Encrypted: read.header.Encrypted, SignatureTrusted: read.signerFingerprint() != ""}}, nil
 }
 
 // ResolveTrust 是信任弹窗的答复：remember=false 是「信任一次」（只在这次打开
@@ -156,7 +156,7 @@ func (WorkspaceService) ResolveTrust(fingerprint string, remember bool) (Workspa
 	if err != nil {
 		return WorkspaceFile{}, err
 	}
-	return WorkspaceFile{Path: pending.read.path, Data: data, Encrypted: pending.read.header.Encrypted}, nil
+	return WorkspaceFile{Path: pending.read.path, Data: data, Encrypted: pending.read.header.Encrypted, SignatureTrusted: pending.read.signerFingerprint() != ""}, nil
 }
 
 // DismissTrust 丢弃挂起的读盘（用户选了取消）：没解析的内容一并丢掉，

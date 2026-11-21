@@ -643,6 +643,9 @@ type SavedFolder struct {
 type WorkspaceFile struct {
 	Path string        `json:"path"`
 	Data WorkspaceData `json:"data"`
+	// SignatureTrusted：v2 已验签且签名者载入时已获信任（持久或「信任一次」）才
+	// 为 true——前端据此跳过脚本信任弹窗。v1 与未签名 v2 恒为 false。
+	SignatureTrusted bool `json:"signatureTrusted"`
 }
 
 // WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空（File 是
@@ -774,9 +777,10 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   不能拿 revision 当身份，敲一个字它就变了。
 - 脚本信任（纯内存、不落盘）：`scriptsTrusted` + `scriptsTrustedInWorkspace()` /
   `trustWorkspaceScripts()`。初始与 `newWorkspace()` 恒可信（本地会话里的脚本是用户
-  自己写的），`loadWorkspace()` 时 `scriptsTrusted = !workspaceHasScripts()`——打开/
-  拖入的 .band 只要任一条目带前后脚本就先标不可信，等用户在执行前确认（见「工作区
-  （前端）」的脚本信任边界）。
+  自己写的），`loadWorkspace()` 时 `scriptsTrusted = !workspaceHasScripts() ||
+  file.signatureTrusted`——打开/拖入的 .band 只要任一条目带前后脚本就先标不可信，等
+  用户在执行前确认；**例外**：v2 已验签且签名者已获信任（含「信任一次」）的工作区
+  身份已密码学确认，`signatureTrusted=true`（后端 WorkspaceFile 字段），脚本直接放行。
 - `ResponseState` 追加脚本产物（不持久化）：`scriptLogs/scriptTests/preScriptError/postScriptError`。
 - 订阅-通知（简单 emitter）；请求字段变更即写入 `localStorage["netdream.request"]`（防抖 300ms）。
   快照**不含 `examples`**：响应示例可能带 ≤10MiB 的响应体，一条就能把配额撑满、把快照写坏；
@@ -1004,8 +1008,10 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 - **脚本信任边界**（不可信 .band 的预脚本能外带数据）：打开的 .band 里的预脚本能读
   `nd.vars`、请求头、请求体，改写 URL/请求，再由后端附上 Basic/Bearer 发出——一份
   文件就足以把变量里的凭据送到任意地址。所以 `loadWorkspace` 时 `scriptsTrusted =
-  !workspaceHasScripts()`（**本地恢复的会话与 `newWorkspace` 恒可信**，没有脚本的工作区
-  也不受影响），`send()` 在带脚本的请求真正发出前检查 `scriptsTrustedInWorkspace()`，
+  !workspaceHasScripts() || file.signatureTrusted`（**本地恢复的会话与 `newWorkspace` 恒
+  可信**，没有脚本的工作区不受影响；**v2 已验签且签名者已获信任——含「信任一次」——的
+  工作区也直接可信**，身份已经密码学确认过，v1 与未签名 v2 不在其列），`send()` 在带
+  脚本的请求真正发出前检查 `scriptsTrustedInWorkspace()`，
   不可信就只弹 `components/scriptTrust.ts` 的两键框（「信任并运行 / 不运行」，默认焦点
   在不运行），**不发送**；弹框时记下 `{generation, editor}`，确认时**只有两者都还匹配**
   才 `trustWorkspaceScripts()` 并重新走一遍 `send()`，否则什么都不做——弹框期间拖入/打开

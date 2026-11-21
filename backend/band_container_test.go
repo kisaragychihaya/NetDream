@@ -100,6 +100,9 @@ func TestBandContainerPlainRoundTrip(t *testing.T) {
 	if opened.File.Path != path {
 		t.Fatalf("path = %q, want %q", opened.File.Path, path)
 	}
+	if opened.File.SignatureTrusted {
+		t.Fatalf("未签名的容器不该标记 SignatureTrusted")
+	}
 	if !reflect.DeepEqual(opened.File.Data, want) {
 		t.Fatalf("往返之后 = %#v, want %#v", opened.File.Data, want)
 	}
@@ -130,6 +133,9 @@ func TestBandContainerSignedRoundTrip(t *testing.T) {
 	}
 	if opened.Trust != nil {
 		t.Fatalf("自己的签名不该问信任：%#v", opened.Trust)
+	}
+	if !opened.File.SignatureTrusted {
+		t.Fatalf("已验签且签名者可信，SignatureTrusted 应为 true")
 	}
 	if !reflect.DeepEqual(opened.File.Data, want) {
 		t.Fatalf("往返之后 = %#v, want %#v", opened.File.Data, want)
@@ -226,6 +232,9 @@ func TestBandContainerTrustFlow(t *testing.T) {
 	}
 	if file.Path != path || !reflect.DeepEqual(file.Data, want) {
 		t.Fatalf("信任一次之后 = %#v, want %#v", file, want)
+	}
+	if !file.SignatureTrusted {
+		t.Fatalf("信任一次也是信任：SignatureTrusted 应为 true")
 	}
 
 	// 「信任一次」取走即失效：再打开仍然要问。
@@ -553,6 +562,9 @@ func TestOpenWorkspaceReadsV1Archive(t *testing.T) {
 	}
 	if opened.Trust != nil {
 		t.Fatalf("v1 归档不该问信任：%#v", opened.Trust)
+	}
+	if opened.File.SignatureTrusted {
+		t.Fatalf("v1 没有签名，SignatureTrusted 应为 false")
 	}
 	if !reflect.DeepEqual(opened.File.Data, want) {
 		t.Fatalf("v1 读取 = %#v, want %#v", opened.File.Data, want)
