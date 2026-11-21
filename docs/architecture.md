@@ -411,16 +411,41 @@ Version="3" 时的 Socket.IO v2 / Engine.IO v3）；**不实现 long-polling，�
 
 ### 工作区（.band）
 
-`.band` 文件 = zip 压缩包（`archive/zip`），内部结构：
+`.band` 有两种容器，按文件头 sniff（前 4 字节）区分：
+
+- **`PK\x03\x04` 开头 = v1**：裸 zip 压缩包，行为与历史版本完全一致（见下）。
+- **`NDB2` magic 开头 = v2（当前写出版本）**：自定义容器
+  `| "NDB2" | u32le 头长度 | header JSON（明文，≤1MiB） | zip 二进制区域 |`。
+  压缩**先于**加密：zip 先 deflate，密文不经过压缩器，压缩率无损。
+
+**zip 二进制区域**内部结构两种容器相同（`archive/zip`）：
 
 ```
-workspace.json          # {"version": 1, "name": "工作区名", "folders": [...]}
+workspace.json          # {"version": 1, "name": "工作区名", "folders": [...]}（版本字段留在 1，容器头接管版本）
 engine/vars.json        # 脚本变量（Record<string,string>）；缺失/解析失败 = 空
 requests/<id>.json      # 每个已保存请求 / Markdown 文档一个文件，JSON（SavedRequest，缩进格式）
 ```
 
-`workspace.json` 的 `version` 必须为 1，否则报错；`requests/*.json` 与
-`engine/vars.json` 解析失败的条目跳过（vars 失败 = 空变量表，不报错）。
+**v2 header JSON（明文）**：
+
+```json
+{
+  "format": "ndband", "version": 2,
+  "identity": {"id", "email", "ed25519", "ecdh", "fingerprint"},
+  "encrypted": true,
+  "ephPub": "...", "keys": [{"hash", "wrapped"}],
+  "cipher": {"algo": "AES-128-GCM-STREAM", "chunkSize": 4194304, "noncePrefix": "8B b64"},
+  "zip": {"size": 12345, "digest": "sha256(zip 明文全部字节) hex"},
+  "signedAt": 1735689600000,
+  "signature": "base64(ed25519 签名)"
+}
+```
+
+- 加密时 zip 区域 = **分块 AEAD 密文**（见「加密信封」），`workspace.json` 等条目
+  不再单独加密；不加密则区域是明文 zip，`zip.digest` 照旧覆盖（防篡改）。
+- `requests/*.json` 与 `engine/vars.json` 解析失败的条目跳过（vars 失败 = 空变量表，
+  不报错）——两种容器一致。
+- v1 归档照常读取，视为未签名、不弹信任窗。
 
 **解压限额**（`readBand`/`readBandBytes`）：`.band` 是不可信输入，手工造一个 zip bomb
 就能把内存吃光，所以读之前先设上限——归档本身 128MiB（先 `os.Stat` 再看是否读）、
@@ -447,27 +472,96 @@ requests/<id>.json      # 每个已保存请求 / Markdown 文档一个文件，
     否则从根走不到、整棵子树在页面上画不出来。
 - 写读顺序都保持：`folders` 数组顺序即同级顺序，`requests` 数组顺序即文件夹内顺序。
 
-绑定 `WorkspaceService`（注意导出方法仅限这六个）：
+#### 身份与信任
 
-- `Open() (WorkspaceFile, error)` — 打开文件对话框（过滤 `.band`），读 zip 返回
-  `{path, data}`；用户取消返回 `WorkspaceFile{}`（Path 为空串，前端据此判取消）。
-- `OpenPath(path string) (WorkspaceFile, error)` — 不经对话框直接读指定
-  `.band` 路径（拖入打开用）；扩展名必须是 `.band`（大小写不敏感），否则报错。
-  与 Open 相同返回 `{path, data}`——**带真实路径，保存直接写回原文件**。
-- `Save(path string, data WorkspaceData) error` — 覆盖写 zip 到 path。
-- `SaveAs(data WorkspaceData) (string, error)` — 保存对话框（默认文件名 `name.band`，
-  缺 `.band` 后缀自动补），写 zip 返回实际路径；取消返回 `("", nil)`。
+应用持有**一组身份密钥**（backend/identity.go）：ed25519 签名密钥对 + X25519(ECDH)
+密钥对，首次运行生成，存 `os.UserConfigDir()/NetDream/identity.json`（0600）；
+`trusted.json`（同目录）存持久信任列表（含全公钥，为加密收件人准备），另有进程内
+`trustedOnce` map 承载「信任一次」。每次成功载入或导入 band 都把签发者身份记入
+`identities.json` 缓存（去重按指纹，上限 200 条），供加密保存的收件人选择。
+**信任锚是公钥指纹**（ed25519 公钥的 sha256 hex，界面取前 16 位），id/email 只是
+可改的展示信息，改 id 不影响旧签名包的验证。
+
+签名覆盖 header 中除 `signature` 外全部字段（含 identity 与 zip.digest）：验证侧
+重新 marshal 比对，任何未知字段/改动都令签名失效（fail closed）。**保存者永远用
+自己的身份重签**——编辑别人的 band 再保存，签名与 identity 自然变成编辑者的。
+
+打开顺序（v2）：sniff → 解头 → 加密则先查 keys 里有没有给自己的包裹（没有 =
+「不是给你的」报错）→ 验签（身份在但签名不成立 = 硬错误；加密但无签名 = 拒绝）→
+身份未知 → 挂起并返回 TrustPrompt（只含 header 信息，零解密成本）；确认后经
+ResolveTrust 才做解密/直读 + 摘要比对 + 解 zip 条目。信任弹窗显示 ID + 邮箱 +
+指纹，三键：**信任一次 / 信任公钥 / 取消**（取消丢弃挂起数据）。v1 无身份，不弹窗。
+
+#### 加密信封与分块流式加密
+
+zip 密钥 = 随机 16 字节（AES-128）。**加密对象是整个 zip 二进制区域**，分块 AEAD
+（STREAM 构造）：4MiB 一块，每块 `nonce(12B) || AES-128-GCM(zip密钥, 块明文)`，
+`nonce = noncePrefix(8B 文件级随机) || BE32(块序号)`——可流式、可逐块验 tag
+（截断/篡改/错钥块粒度即败）、且块 nonce 由序号决定所以支持按块随机访问解密。
+摘要 `zip.digest` 对**明文**流计算（写盘时边压缩边算）。
+
+信封：临时 X25519 密钥对，`shared = ECDH(临时私钥, 收方公钥)`，
+`wrapKey = HKDF-SHA256(salt=ephPub, info="netdream-band-wrap-v1", 16B)`，
+`wrapped = nonce(12B) || AES-128-GCM(wrapKey, zip密钥)`；每个收方一个
+`keys[] = {hash: sha256(收方 ecdh 公钥) hex, wrapped}`，明文 meta 里同时放 `ephPub`。
+
+读：按 `sha256(本机 ecdh 公钥)` 找包裹 → 私钥解出 zip 密钥 → 区域流式解密。
+限额按明文判定；归档本身仍受 128MiB 上限（头 ≤1MiB，区域明文 ≤128MiB）。
+
+**重保存沿用原信封**：加密 band 保存时若未另选收件人，原样复用 zipKey + ephPub +
+keys[]（能解密就必然能原样再加密，收件人不变；noncePrefix 每次重写都换新的，
+(zipKey, nonce) 对不复用）。keys 只存收方公钥的 hash，旧收件人公钥不可恢复，
+所以重保存不允许「追加收件人」——要换收件人群只能另存新文件并重新勾选（原发件人
+公钥可从身份缓存拿到，其余旧收件人若公钥不在缓存则会失去访问权，界面不阻止但
+文档注明）。
+
+#### 保存加密流程（前端）
+
+原生保存对话框（`AskSavePath`）→ 前端 modal「加密保存」勾选框 → 勾选后出现
+收件人复选列表：**自己 + trusted.json + identities.json 缓存 + 从 .band 文件
+导入公钥**（解析目标 band 的 header identity，加密 band 也可导入——头与身份恒为
+明文）→ `Save(path, data, {encrypt, recipients})`。当前 band 已加密时勾选框默认
+选中并注明「沿用原收件人」：一个都不勾 = 原信封重写；新勾选了人 = 全新信封
+（只写给勾选的）。
+
+绑定 `WorkspaceService`（导出方法）：
+
+- `Open() (WorkspaceOpen, error)` — 打开文件对话框（过滤 `.band`），v2 走容器管线；
+  返回 `{file}`（直接可加载，身份已信任或无签名）或 `{trust: TrustPrompt}`（身份未知，
+  数据尚未解析，等用户决定）；用户取消返回空 `WorkspaceOpen`。
+- `OpenPath(path string) (WorkspaceOpen, error)` — 不经对话框直接读指定 `.band` 路径
+  （拖入打开用）；扩展名必须是 `.band`（大小写不敏感），否则报错。
+- `ResolveTrust(fingerprint string, remember bool) (WorkspaceFile, error)` — 用户在信任
+  弹窗选了「信任一次」（remember=false，进进程内 trustedOnce）或「信任公钥」
+  （remember=true，追加 trusted.json 并返回 `{path, data}`。挂起槽单次，不匹配或过期报错。
+- `DismissTrust()` — 「取消」：丢弃挂起数据。
+- `AskSavePath(name string) (string, error)` — 原生保存对话框（默认文件名
+  `name.band`，缺后缀自动补），只返回路径；取消返回 `("", nil)`。加密选择在后续的
+  Save 参数里。
+- `Save(path string, data WorkspaceData, opts SaveOptions) error` — 覆盖写。opts.encrypt
+  + recipients 非空 = 新信封写给勾选的人；opts.encrypt + recipients 空 + 该 path
+  当前持有加密信封 = 沿用原信封重写；其余情况按明文写。保存者永远用自己的身份签名。
 - `SetDirty(dirty bool)` — 前端推送工作区脏状态；脏时关闭窗口会先问过页面。
 - `CloseWindow()` — 页面用户选择「不保存」后调用：强制关闭窗口（一次性 force，
   见 backend/close.go）。
-- 写文件先写**同目录唯一临时文件**（`os.CreateTemp(dir, ".<name>.*.tmp")`，权限补到
-  0644）再 `os.Rename`，避免写一半损坏原文件；失败时临时文件删掉，成功才替换。
-  归档是**直接流进**这个临时文件的（`zip.NewWriter(tmp)`，逐条 `requests/<id>.json`
-  边编码边写），不在内存里攒一整份 zip——响应示例每条可带 ≤10MiB 的响应体。
-  失败路径先把临时文件关掉再删（Windows 上还开着的文件删不掉）。
-  `writeBand` 另有一把包级互斥锁串行化本进程的写盘：同一路径的两次保存在时间上
-  重叠时不会在临时文件与 rename 上互相踩（Windows 上并发替换同一目标是硬错误）。
-  跨进程（两个应用实例）同路径并发写不在保护范围内。
+- 写盘（v2）：zip 先流进**区域临时文件**（需要加密则套分块加密写滤器，同时对明文跑
+  sha256 得 zip.digest），完后用自己的身份签 header（含 digest），再写最终临时文件
+  = magic + 头长 + header + 区域内容拷贝，rename 替换。仍然是同目录唯一临时文件 +
+  原子 rename + 包级写锁（见 workspace.go），失败路径先关后删（Windows 限制）。响应
+  示例每条可带 ≤10MiB 响应体，全程 O(块) 内存。读盘：v2 区域统一流式 spool 到临时
+  文件（解密或直读都边读边算 digest），再 `zip.NewReader` 解条目——两种 v2 只读一遍
+  原文件，且 zip 侧保持 seekable。
+
+绑定 `IdentityService`（backend/identity.go）：
+
+- `Get() IdentityInfo` — 当前身份；`status: "unset" | "ready"`（unset = 首次运行还没建）。
+- `Setup(email string) (IdentityInfo, error)` — 首次运行创建：ed25519 + X25519 各一对；
+  email 为空则随机「形容词+名词@主机名」。生成毫秒级，直接同步做。
+- `Update(email, id string) (IdentityInfo, error)` — 改展示信息；指纹与密钥不变。
+- `Candidates() []IdentityCandidate` — 加密保存收件人候选 = 自己 + trusted + 身份缓存。
+- `ImportFromBand() (IdentityCandidate, error)` — 弹 .band 对话框，读其 header 的
+  identity（加密 band 也可读），同时写入身份缓存；取消返回空。
+- `Trusted() []TrustedIdentity` / `Untrust(fingerprint string)` — 信任列表查看/移除。
 
 窗口关闭守卫（backend/close.go）：`Window.OnClose` 里 `force || !dirty` 才放行，
 否则 `PreventDefault()` 并向页面发事件 `workspace:closeRequested`（bool 负载），
@@ -549,6 +643,56 @@ type SavedFolder struct {
 type WorkspaceFile struct {
 	Path string        `json:"path"`
 	Data WorkspaceData `json:"data"`
+}
+
+// WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空。
+// 用户取消对话框时两个都为空（等价旧的 WorkspaceFile{}）。
+type WorkspaceOpen struct {
+	File  WorkspaceFile `json:"file,omitempty"`
+	Trust *TrustPrompt  `json:"trust,omitempty"`
+}
+
+// TrustPrompt 是 v2 容器里未知身份的签名者信息；信任弹窗据此展示。
+type TrustPrompt struct {
+	Path        string `json:"path"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"` // sha256(ed25519 公钥) hex，展示取前 16 位
+}
+
+// SaveOptions 控制 Save 的加密行为；见「保存加密流程」。
+type SaveOptions struct {
+	Encrypt    bool     `json:"encrypt"`
+	Recipients []string `json:"recipients"` // base64 X25519 公钥；空 + 已加密 band = 沿用原信封
+}
+
+// IdentityInfo 是本机身份（私钥永不出 Go 侧）。
+type IdentityInfo struct {
+	Status      string `json:"status"` // "unset" | "ready"
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"`
+	Ed25519     string `json:"ed25519"` // base64 公钥
+	ECDH        string `json:"ecdh"`    // base64 公钥
+	CreatedAt   int64  `json:"createdAt"`
+}
+
+// IdentityCandidate 是加密保存的收件人候选（只含公钥与展示信息）。
+type IdentityCandidate struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"`
+	ECDH        string `json:"ecdh"`
+}
+
+// TrustedIdentity 是 trusted.json 的行，也是信任列表的展示形态。
+type TrustedIdentity struct {
+	Fingerprint string `json:"fingerprint"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Ed25519     string `json:"ed25519"`
+	ECDH        string `json:"ecdh"`
+	AddedAt     int64  `json:"addedAt"`
 }
 ```
 
@@ -777,7 +921,9 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
 - `WorkspaceState`（state.ts，**不**进 localStorage 编辑器存档）：
   `name: string`、`path: string | null`、`entries: SavedRequest[]`（生成类型）、
   `folders: SavedFolder[]`（请求树的分组，生成类型）、
-  `currentId: string | null`（编辑器当前对应的条目 id；null = 未保存的新请求）。
+  `currentId: string | null`（编辑器当前对应的条目 id；null = 未保存的新请求）、
+  `encrypted: boolean`（当前 .band 是否加密保存；载入、另存、保存成功后按
+  `WorkspaceFile.encrypted` / `SaveOptions.encrypt` 写回，v1 与明文恒为 false）。
 - 请求分组（folders）：归属只存在 `folders[].requests` 里（文件夹 → 请求 ID），
   没被任何文件夹引用的请求平铺在根目录；`parentId` 空串 = 根。
   归一化（孤儿请求、重复归属、悬空 parentId、环）由 Go 侧读取 .band 时做完，
@@ -809,9 +955,25 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   **派生新条目规则泛化为：HTTP 比较 method+URL、WS/TCP/Socket.IO 比较 URL——与已入册
   条目不一致即视为新请求，执行后派生新条目，原条目原样保留**；未变的编辑按 id 原地
   刷新，**改过名的条目保留别名**。
+- 打开流程（main.ts，`WorkspaceOpen` 两种形态）：`Open` / `OpenPath` 都返回
+  `{file}`（可直接加载）、`{trust}`（签发者未知，后端只解到 header）或空（对话框取消）。
+  两个入口（侧栏「打开」、拖入 .band）都过 `handleOpenResult`：`file` → `guardUnsaved`
+  后 `loadWorkspace`；`trust` → `components/bandTrust.ts` 三键框（「信任一次」/
+  「信任公钥」/「取消」，展示 ID、邮箱与指纹前 16 位，默认焦点在取消）→
+  `resolveTrust(fingerprint, remember)` 拿回 `WorkspaceFile` 再走同一条加载路径；
+  取消走 `dismissTrust()` 丢弃挂起数据。指纹对不上或挂起槽已过期按错误条展示并中止
+  加载。信任弹窗挂着期间新的打开/拖入触发被忽略（后端挂起槽只留一份读盘），
+  ID/邮箱一律 textContent 写入。
 - 保存流程（main.ts）：内存即真相——「保存」把 `WorkspaceState` 整块
-  `{name, entries, folders}` + 当前变量表（`vars: getVars()`）写进 .band；有 path 走 `save`，
-  无 path 走 `saveAs` 并写回路径（取消仅影响落盘）。保存失败在响应区错误条显示。
+  `{name, entries, folders}` + 当前变量表（`vars: getVars()`）写进 .band。路径先行：
+  有 path 直接用，无 path（或「另存为」）先 `AskSavePath(name)`，返回空串 = 取消。
+  拿到路径后**总是**弹 `components/saveDialog.ts`（`{encrypt, recipients}` 的 Promise）：
+  「加密保存」勾选框 + 收件人复选列表（`IdentityService.candidates()`，可「从 .band
+  导入公钥…」= `importFromBand()` 后自动勾选该条）；已加密的 band 默认勾选并注明
+  「未勾选任何收件人 = 沿用原收件人」，但只有写回当前文件才谈得上沿用（后端按路径记
+  信封），否则一个都没勾时前端就地报「请至少选择一个收件人」、不发请求。确认后
+  `Save(path, data, opts)`；成功后写回 path 与 `encrypted = opts.encrypt`。取消保存选项
+  = 没写盘。保存失败在响应区错误条显示。
   两次保存**串行排队**（`saveChain`），后一次等前一次写完再取快照，连点不会旧数据覆盖新数据。
   清脏带**版本号守卫**：`performSave` 先 `upsertEntry(snapshotCurrent())`、再记下
   `getWorkspaceRevision()` 与 `getWorkspaceGeneration()`，写盘返回后只有 revision 没变
@@ -827,6 +989,17 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   新建工作区（「保存 / 取消保存 / 取消新建」）、打开 .band、拖入 .band
   （后三个走 main.ts `guardUnsaved`，**文件选定/读取成功后才弹框**；保存成功才继续，
   saveAs 取消则留在应用）。Esc / 点遮罩 = 取消；保存中三键禁用。
+- 身份（`components/firstRun.ts`、`components/settings.ts`）：启动时
+  `IdentityService.get()`，`status === "unset"` 弹首次运行窗（说明 + 邮箱输入 +
+  「跳过」/「确定」；跳过 = `setup("")` 由后端生成随机「形容词名词@主机名」）。
+  该窗**不可绕过**：不注册 Esc、点遮罩也不关，二选一都会真的建立身份；失败留在框内
+  显示。已有身份永不弹。设置页「身份」分区：邮箱/ID 可编辑（各一个「保存」→
+  `update(email, id)`，空串 = 该项不动）、指纹前 16 位、ed25519/ecdh 只读公钥 +
+  「复制」（`navigator.clipboard`，失败退回选中文本）、信任公钥列表（id/email/指纹
+  前 8 位 + 「移除」→ `untrust`，空列表给空态文案）。进页与打开设置各重取一次身份，
+  取到的身份缓存在 state.ts（`getCachedIdentity` / `setCachedIdentity`）。
+- 新组件文件：`components/firstRun.ts`（首次运行身份窗）、`components/bandTrust.ts`
+  （打开时的签名者信任窗）、`components/saveDialog.ts`（保存选项：加密 + 收件人）。
 - **脚本信任边界**（不可信 .band 的预脚本能外带数据）：打开的 .band 里的预脚本能读
   `nd.vars`、请求头、请求体，改写 URL/请求，再由后端附上 Basic/Bearer 发出——一份
   文件就足以把变量里的凭据送到任意地址。所以 `loadWorkspace` 时 `scriptsTrusted =

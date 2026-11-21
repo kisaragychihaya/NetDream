@@ -203,11 +203,11 @@ type SavedExample struct {
 }
 
 type SavedRequest struct { // RequestState 的快照 + 展示名
-	ID              string             `json:"id"`
-	Name            string             `json:"name"`
-	Kind            string             `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band）
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band）
 	// Markdown 是 kind="markdown" 的文档内容；其余 kind 恒为空串。
-	Markdown string `json:"markdown"`
+	Markdown        string             `json:"markdown"`
 	Method          string             `json:"method"`
 	URL             string             `json:"url"`
 	Params          []KeyValue         `json:"params"`
@@ -253,4 +253,57 @@ type WorkspaceData struct {
 type WorkspaceFile struct {
 	Path string        `json:"path"`
 	Data WorkspaceData `json:"data"`
+	// Encrypted 标记该 band 以加密信封保存；前端保存弹窗据此默认勾选
+	// 「沿用原收件人」。v1 与明文 v2 恒为 false。
+	Encrypted bool `json:"encrypted"`
+}
+
+// WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空。
+// 用户取消对话框时两个都为空（等价旧的 WorkspaceFile{}）。
+type WorkspaceOpen struct {
+	File  WorkspaceFile `json:"file,omitempty"`
+	Trust *TrustPrompt  `json:"trust,omitempty"`
+}
+
+// TrustPrompt 是 v2 容器里未知身份的签名者信息；信任弹窗据此展示。
+type TrustPrompt struct {
+	Path        string `json:"path"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"` // sha256(ed25519 公钥) hex，展示取前 16 位
+}
+
+// SaveOptions 控制 Save 的加密行为；见「保存加密流程」。
+type SaveOptions struct {
+	Encrypt    bool     `json:"encrypt"`
+	Recipients []string `json:"recipients"` // base64 X25519 公钥；空 + 已加密 band = 沿用原信封
+}
+
+// IdentityInfo 是本机身份（私钥永不出 Go 侧）。
+type IdentityInfo struct {
+	Status      string `json:"status"` // "unset" | "ready"
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"`
+	Ed25519     string `json:"ed25519"` // base64 公钥
+	ECDH        string `json:"ecdh"`    // base64 公钥
+	CreatedAt   int64  `json:"createdAt"`
+}
+
+// IdentityCandidate 是加密保存的收件人候选（只含公钥与展示信息）。
+type IdentityCandidate struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Fingerprint string `json:"fingerprint"`
+	ECDH        string `json:"ecdh"`
+}
+
+// TrustedIdentity 是 trusted.json 的行，也是信任列表的展示形态。
+type TrustedIdentity struct {
+	Fingerprint string `json:"fingerprint"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	Ed25519     string `json:"ed25519"`
+	ECDH        string `json:"ecdh"`
+	AddedAt     int64  `json:"addedAt"`
 }

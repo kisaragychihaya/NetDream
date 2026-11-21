@@ -5,6 +5,7 @@ import type {
   APIRequest,
   APIResponse,
   FormField,
+  IdentityInfo,
   KeyValue,
   SavedExample,
   SavedFolder,
@@ -131,6 +132,11 @@ export interface WorkspaceState {
   /** 请求树的文件夹；没有归属的请求平铺在根目录（folders 里查不到它的 id）。 */
   folders: SavedFolder[];
   currentId: string | null;
+  /**
+   * 当前 .band 是否以加密信封保存（v1 与明文 v2 恒为 false）。保存弹窗据此默认
+   * 勾选「加密保存」并注明可以沿用原收件人。
+   */
+  encrypted: boolean;
 }
 
 export function emptyRow(): KVRow {
@@ -512,6 +518,23 @@ export function subscribeVars(listener: Listener): () => void {
   };
 }
 
+/* ---- 本机身份缓存 ---- */
+
+// 启动时（以及首次运行窗建好身份后）取一次身份存在这里：设置页打开时要立刻有
+// 东西可显示，不必先等一次跨进程往返。真值仍以后端为准——设置页每次打开照旧调
+// IdentityService.get() 刷新。
+let cachedIdentity: IdentityInfo | null = null;
+
+/** 最近一次取到的本机身份；还没取过或还没建立时为 null。 */
+export function getCachedIdentity(): IdentityInfo | null {
+  return cachedIdentity;
+}
+
+/** 记下最新取到的本机身份；身份没建立时传 null。 */
+export function setCachedIdentity(identity: IdentityInfo | null): void {
+  cachedIdentity = identity;
+}
+
 // 换掉整份变量而不置脏：载入工作区时用，变量属于那个文件，替换本身不是改动。
 function replaceVars(next: Record<string, string>): void {
   vars = { ...next };
@@ -812,6 +835,7 @@ const workspace: WorkspaceState = {
   entries: [],
   folders: [],
   currentId: null,
+  encrypted: false,
 };
 
 export function getWorkspace(): WorkspaceState {
@@ -917,6 +941,8 @@ export function loadWorkspace(file: WorkspaceFile): void {
   workspace.entries = file.data.requests;
   // 请求树的归一化（孤儿请求、悬空 parentId、环）Go 侧读取时就做完了，这里直接信。
   workspace.folders = file.data.folders;
+  // v1 与明文 v2 的 encrypted 恒为 false：保存弹窗据此决定是否默认勾选加密。
+  workspace.encrypted = file.encrypted === true;
   // 变量属于工作区文件：整体换掉，且替换本身不算改动（清脏统一在后面做）。
   replaceVars(hydrateVars(file.data.vars));
   // 打开的 .band 里的脚本不可信：第一次要执行脚本前先问用户（见 trustWorkspaceScripts）。
@@ -943,6 +969,8 @@ export function newWorkspace(): void {
   workspace.entries = [];
   workspace.folders = [];
   workspace.currentId = null;
+  // 新工作区没有文件，也就没有信封：保存时默认不加密。
+  workspace.encrypted = false;
   // 新工作区里的脚本都是用户自己写的：没有不可信来源，不必再问。
   scriptsTrusted = true;
   // 变量跟着工作区走，新工作区从空变量开始；走不置脏的安静路径。
@@ -1050,6 +1078,14 @@ export function setWorkspacePath(path: string): void {
   if (workspace.path === path) return;
   workspace.path = path;
   notify();
+}
+
+/**
+ * 记下当前 .band 是否加密保存。保存成功时由 main.ts 按写盘结果写回；这属于
+ * 「这份文件是怎么存的」，不是内容改动，所以不置脏。
+ */
+export function setWorkspaceEncrypted(encrypted: boolean): void {
+  workspace.encrypted = encrypted;
 }
 
 /**

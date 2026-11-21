@@ -54,59 +54,167 @@ type bandMeta struct {
 // Every exported method here is bound to the frontend, so helpers stay unexported.
 type WorkspaceService struct{}
 
+// pendingTrust 是挂起槽：一个身份未知的 v2 band 已经解了头、还没解密，等用户的
+// 信任决定。单槽——信任弹窗是模态的，第二次打开没答完的询问应当覆盖第一次。
+type pendingBand struct {
+	read *bandRead
+}
+
+var (
+	bandPendingMu sync.Mutex
+	bandPending   *pendingBand
+)
+
 // Open asks for a .band file and returns the workspace in it, or a zero
-// WorkspaceFile when the user cancels the dialog.
-func (WorkspaceService) Open() (WorkspaceFile, error) {
+// WorkspaceOpen when the user cancels the dialog.
+func (WorkspaceService) Open() (WorkspaceOpen, error) {
 	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 		Title:   "打开工作区",
 		Filters: []mygo.FileFilter{{Name: "NetDream 工作区", Extensions: []string{"band"}}},
 	})
 	if err != nil {
-		return WorkspaceFile{}, fmt.Errorf("opening the workspace dialog failed: %w", err)
+		return WorkspaceOpen{}, fmt.Errorf("opening the workspace dialog failed: %w", err)
 	}
 	if len(paths) == 0 || paths[0] == "" {
-		return WorkspaceFile{}, nil
+		return WorkspaceOpen{}, nil
 	}
-
-	data, err := readBand(paths[0])
-	if err != nil {
-		return WorkspaceFile{}, err
-	}
-	return WorkspaceFile{Path: paths[0], Data: data}, nil
+	return openWorkspace(paths[0])
 }
 
 // OpenPath reads the .band workspace at path, which the page got from a
 // dropped file rather than the dialog: the path is known, so Save writes the
 // workspace back to it.
-func (WorkspaceService) OpenPath(path string) (WorkspaceFile, error) {
+func (WorkspaceService) OpenPath(path string) (WorkspaceOpen, error) {
 	if strings.TrimSpace(path) == "" {
-		return WorkspaceFile{}, fmt.Errorf("opening a dropped workspace needs a path")
+		return WorkspaceOpen{}, fmt.Errorf("opening a dropped workspace needs a path")
 	}
 	if !strings.EqualFold(filepath.Ext(path), bandExt) {
-		return WorkspaceFile{}, fmt.Errorf("%s is not a %s workspace", filepath.Base(path), bandExt)
+		return WorkspaceOpen{}, fmt.Errorf("%s is not a %s workspace", filepath.Base(path), bandExt)
+	}
+	return openWorkspace(path)
+}
+
+// openWorkspace 走完整读盘管线：v1 是裸 zip，直接读完；v2 要解头、验签，身份
+// 未知时挂起等用户确认（那时一个字节的 zip 区域都还没读）。
+func openWorkspace(path string) (WorkspaceOpen, error) {
+	container, err := sniffBand(path)
+	if err != nil {
+		return WorkspaceOpen{}, err
+	}
+	if container == bandContainerV1 {
+		data, err := readBand(path)
+		if err != nil {
+			return WorkspaceOpen{}, err
+		}
+		// v1 是明文归档：之前记下的加密信封不能再用到这个路径上。
+		rememberBandEnvelope(path, nil)
+		return WorkspaceOpen{File: WorkspaceFile{Path: path, Data: data}}, nil
 	}
 
-	data, err := readBand(path)
+	read, err := stageBandRead(path, defaultBandContainerLimits())
+	if err != nil {
+		return WorkspaceOpen{}, err
+	}
+	if read.prompt != nil {
+		bandPendingMu.Lock()
+		bandPending = &pendingBand{read: read}
+		bandPendingMu.Unlock()
+		return WorkspaceOpen{Trust: read.prompt}, nil
+	}
+	data, err := finishBandRead(read)
+	if err != nil {
+		return WorkspaceOpen{}, err
+	}
+	return WorkspaceOpen{File: WorkspaceFile{Path: path, Data: data, Encrypted: read.header.Encrypted}}, nil
+}
+
+// ResolveTrust 是信任弹窗的答复：remember=false 是「信任一次」（只在这次打开
+// 生效），true 是「信任公钥」（写进 trusted.json）。指纹不匹配或没有挂起的读盘
+// 都报错——挂起槽只消费一次，宁可让用户重开，也不让别人的公钥过关。
+func (WorkspaceService) ResolveTrust(fingerprint string, remember bool) (WorkspaceFile, error) {
+	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
+
+	bandPendingMu.Lock()
+	pending := bandPending
+	bandPending = nil
+	bandPendingMu.Unlock()
+
+	if pending == nil {
+		return WorkspaceFile{}, fmt.Errorf("没有等待确认的工作区：请重新打开文件")
+	}
+	if !strings.EqualFold(fingerprint, pending.read.signerFingerprint()) {
+		return WorkspaceFile{}, fmt.Errorf("信任的指纹与挂起的工作区不符：请重新打开文件")
+	}
+	if remember {
+		if err := addTrustedIdentity(pending.read.header.Identity.trustedRow()); err != nil {
+			return WorkspaceFile{}, err
+		}
+	} else {
+		rememberTrustOnce(fingerprint)
+	}
+	data, err := finishBandRead(pending.read)
 	if err != nil {
 		return WorkspaceFile{}, err
 	}
-	return WorkspaceFile{Path: path, Data: data}, nil
+	return WorkspaceFile{Path: pending.read.path, Data: data, Encrypted: pending.read.header.Encrypted}, nil
 }
 
-// Save writes data over the workspace at path.
-func (WorkspaceService) Save(path string, data WorkspaceData) error {
+// DismissTrust 丢弃挂起的读盘（用户选了取消）：没解析的内容一并丢掉，
+// 什么都不写盘。
+func (WorkspaceService) DismissTrust() {
+	bandPendingMu.Lock()
+	bandPending = nil
+	bandPendingMu.Unlock()
+}
+
+// Save writes data over the workspace at path. 加密与否、写给谁由 opts 决定：
+// 加密 + 指定收件人 = 新信封；加密 + 不指定 = 沿用已载入的信封；否则写明文。
+// 保存者永远用自己的身份签名。
+func (WorkspaceService) Save(path string, data WorkspaceData, opts SaveOptions) error {
 	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("saving a workspace needs a path: use SaveAs for one")
+		return fmt.Errorf("saving a workspace needs a path: use AskSavePath for one")
 	}
-	return writeBand(path, data)
+	identity, err := loadLocalIdentity()
+	if err != nil {
+		return err
+	}
+	envelope, err := saveBandEnvelope(path, opts, identity)
+	if err != nil {
+		return err
+	}
+	if err := writeBandContainer(path, data, identity, envelope, defaultBandContainerLimits()); err != nil {
+		return err
+	}
+	// 写成功的信封就是这个路径现在的信封；明文则清掉旧的。
+	rememberBandEnvelope(path, envelope)
+	return nil
 }
 
-// SaveAs asks where to write data, writes it and returns the path, or "" when
-// the user cancels the dialog.
-func (WorkspaceService) SaveAs(data WorkspaceData) (string, error) {
+// saveBandEnvelope 决定这次保存用哪个信封。
+func saveBandEnvelope(path string, opts SaveOptions, identity *localIdentity) (*bandEnvelope, error) {
+	if !opts.Encrypt {
+		return nil, nil
+	}
+	if identity == nil {
+		return nil, fmt.Errorf("加密保存需要先建立本机身份")
+	}
+	if len(opts.Recipients) > 0 {
+		// 换收件人群只能是另一次全新信封：keys 里只存收方公钥的 hash，
+		// 旧收件人的公钥已经无法恢复，追加是做不到的。
+		return buildBandEnvelope(identity, opts.Recipients)
+	}
+	if envelope := recalledBandEnvelope(path); envelope != nil {
+		return envelope, nil
+	}
+	return nil, fmt.Errorf("加密保存需要至少选择一个收件人")
+}
+
+// AskSavePath asks where to write a workspace and returns the path, or "" when
+// the user cancels the dialog: 加密与否由后续的 Save 参数决定，这里只挑位置。
+func (WorkspaceService) AskSavePath(name string) (string, error) {
 	path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
-		Title:       "工作区另存为",
-		DefaultPath: bandFileName(data.Name),
+		Title:       "保存工作区",
+		DefaultPath: bandFileName(bandBaseName(name)),
 		Filters:     []mygo.FileFilter{{Name: "NetDream 工作区", Extensions: []string{"band"}}},
 	})
 	if err != nil {
@@ -115,12 +223,8 @@ func (WorkspaceService) SaveAs(data WorkspaceData) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-
-	path = bandPath(path)
-	if err := writeBand(path, data); err != nil {
-		return "", err
-	}
-	return path, nil
+	// 用户可能把扩展名删掉了：补回去，Save 才不会写到另一个名字上。
+	return bandPath(path), nil
 }
 
 // SetDirty tells the window whether the workspace holds unsaved changes: while
@@ -207,7 +311,12 @@ func readBandBytes(body []byte, name string) (WorkspaceData, error) {
 	if err != nil {
 		return WorkspaceData{}, fmt.Errorf("opening %s failed: %w", name, err)
 	}
+	return readBandEntries(zr, name)
+}
 
+// readBandEntries 解析一个已经打开的 zip 归档：v1（裸 zip）与 v2（容器里的 zip
+// 区域）共用这一套条目规则。
+func readBandEntries(zr *zip.Reader, name string) (WorkspaceData, error) {
 	var (
 		meta    bandMeta
 		hasMeta bool
@@ -511,6 +620,15 @@ func bandPath(path string) string {
 		return path
 	}
 	return path + bandExt
+}
+
+// bandBaseName 去掉 name 末尾的 .band（大小写不敏感）：保存对话框的默认文件名
+// 不该变成 demo.band.band。
+func bandBaseName(name string) string {
+	if strings.EqualFold(filepath.Ext(name), bandExt) {
+		return name[:len(name)-len(bandExt)]
+	}
+	return name
 }
 
 // filled replaces absent lists with empty ones, so the page reads a list where

@@ -93,6 +93,28 @@ export interface FormField {
   filePath: string;
 }
 
+/** IdentityCandidate 是加密保存的收件人候选（只含公钥与展示信息）。 */
+export interface IdentityCandidate {
+  id: string;
+  email: string;
+  fingerprint: string;
+  ecdh: string;
+}
+
+/** IdentityInfo 是本机身份（私钥永不出 Go 侧）。 */
+export interface IdentityInfo {
+  /** "unset" | "ready" */
+  status: string;
+  id: string;
+  email: string;
+  fingerprint: string;
+  /** base64 公钥 */
+  ed25519: string;
+  /** base64 公钥 */
+  ecdh: string;
+  createdAt: number;
+}
+
 /** KeyValue is one key/value pair, e.g. a query parameter, a header or a cookie. */
 export interface KeyValue {
   key: string;
@@ -137,6 +159,13 @@ export interface SSEOpen {
   statusText: string;
   proto: string;
   headers: KeyValue[];
+}
+
+/** SaveOptions 控制 Save 的加密行为；见「保存加密流程」。 */
+export interface SaveOptions {
+  encrypt: boolean;
+  /** base64 X25519 公钥；空 + 已加密 band = 沿用原信封 */
+  recipients: string[];
 }
 
 export interface SavedAssertion {
@@ -308,6 +337,25 @@ export interface SocketSendParams {
   ack: boolean;
 }
 
+/** TrustPrompt 是 v2 容器里未知身份的签名者信息；信任弹窗据此展示。 */
+export interface TrustPrompt {
+  path: string;
+  id: string;
+  email: string;
+  /** sha256(ed25519 公钥) hex，展示取前 16 位 */
+  fingerprint: string;
+}
+
+/** TrustedIdentity 是 trusted.json 的行，也是信任列表的展示形态。 */
+export interface TrustedIdentity {
+  fingerprint: string;
+  id: string;
+  email: string;
+  ed25519: string;
+  ecdh: string;
+  addedAt: number;
+}
+
 export interface WorkspaceData {
   name: string;
   requests: SavedRequest[];
@@ -320,6 +368,20 @@ export interface WorkspaceData {
 export interface WorkspaceFile {
   path: string;
   data: WorkspaceData;
+  /**
+   * Encrypted 标记该 band 以加密信封保存；前端保存弹窗据此默认勾选
+   * 「沿用原收件人」。v1 与明文 v2 恒为 false。
+   */
+  encrypted: boolean;
+}
+
+/**
+ * WorkspaceOpen 是 Open/OpenPath 的返回：File 与 Trust 至多一个非空。
+ * 用户取消对话框时两个都为空（等价旧的 WorkspaceFile{}）。
+ */
+export interface WorkspaceOpen {
+  file?: WorkspaceFile;
+  trust?: TrustPrompt;
 }
 
 // ---- Services ----
@@ -347,28 +409,43 @@ export const RequestService = {
  */
 export const WorkspaceService = {
   /**
+   * AskSavePath asks where to write a workspace and returns the path, or "" when
+   * the user cancels the dialog: 加密与否由后续的 Save 参数决定，这里只挑位置。
+   */
+  askSavePath: bind<[string], string>("WorkspaceService.AskSavePath", (name: string) => [name]),
+  /**
    * CloseWindow closes the window even though the workspace may hold unsaved
    * changes, once the page's user chose to discard them.
    */
   closeWindow: bind<[], void>("WorkspaceService.CloseWindow", () => []),
   /**
-   * Open asks for a .band file and returns the workspace in it, or a zero
-   * WorkspaceFile when the user cancels the dialog.
+   * DismissTrust 丢弃挂起的读盘（用户选了取消）：没解析的内容一并丢掉，
+   * 什么都不写盘。
    */
-  open: bind<[], WorkspaceFile>("WorkspaceService.Open", () => []),
+  dismissTrust: bind<[], void>("WorkspaceService.DismissTrust", () => []),
+  /**
+   * Open asks for a .band file and returns the workspace in it, or a zero
+   * WorkspaceOpen when the user cancels the dialog.
+   */
+  open: bind<[], WorkspaceOpen>("WorkspaceService.Open", () => []),
   /**
    * OpenPath reads the .band workspace at path, which the page got from a
    * dropped file rather than the dialog: the path is known, so Save writes the
    * workspace back to it.
    */
-  openPath: bind<[string], WorkspaceFile>("WorkspaceService.OpenPath", (path: string) => [path]),
-  /** Save writes data over the workspace at path. */
-  save: bind<[string, WorkspaceData], void>("WorkspaceService.Save", (path: string, data: WorkspaceData) => [path, data]),
+  openPath: bind<[string], WorkspaceOpen>("WorkspaceService.OpenPath", (path: string) => [path]),
   /**
-   * SaveAs asks where to write data, writes it and returns the path, or "" when
-   * the user cancels the dialog.
+   * ResolveTrust 是信任弹窗的答复：remember=false 是「信任一次」（只在这次打开
+   * 生效），true 是「信任公钥」（写进 trusted.json）。指纹不匹配或没有挂起的读盘
+   * 都报错——挂起槽只消费一次，宁可让用户重开，也不让别人的公钥过关。
    */
-  saveAs: bind<[WorkspaceData], string>("WorkspaceService.SaveAs", (data: WorkspaceData) => [data]),
+  resolveTrust: bind<[string, boolean], WorkspaceFile>("WorkspaceService.ResolveTrust", (fingerprint: string, remember: boolean) => [fingerprint, remember]),
+  /**
+   * Save writes data over the workspace at path. 加密与否、写给谁由 opts 决定：
+   * 加密 + 指定收件人 = 新信封；加密 + 不指定 = 沿用已载入的信封；否则写明文。
+   * 保存者永远用自己的身份签名。
+   */
+  save: bind<[string, WorkspaceData, SaveOptions], void>("WorkspaceService.Save", (path: string, data: WorkspaceData, opts: SaveOptions) => [path, data, opts]),
   /**
    * SetDirty tells the window whether the workspace holds unsaved changes: while
    * it does, closing the window asks the page before going ahead.
@@ -409,6 +486,40 @@ export const AppService = {
   openURL: bind<[string], void>("AppService.OpenURL", (url: string) => [url]),
   /** Version 返回应用版本号（来自打包信息，即 mygo.config.ts 里的 version）。 */
   version: bind<[], string>("AppService.Version", () => []),
+} as const;
+
+/**
+ * IdentityService 是本机身份与信任列表的入口。
+ * Every exported method here is bound to the frontend, so helpers stay unexported.
+ */
+export const IdentityService = {
+  /** Candidates 是加密保存时的收件人候选：自己、持久信任、身份缓存，按指纹去重。 */
+  candidates: bind<[], IdentityCandidate[]>("IdentityService.Candidates", () => []),
+  /** Get 返回当前身份；还没建立时 status 是 "unset"。 */
+  get: bind<[], IdentityInfo>("IdentityService.Get", () => []),
+  /**
+   * ImportFromBand 从一个 .band 的 header 里导入签发者公钥：加密的 band 也能导
+   * （头和身份恒为明文），但只读头、不信任、不解密。
+   */
+  importFromBand: bind<[], IdentityCandidate>("IdentityService.ImportFromBand", () => []),
+  /**
+   * Setup 首次运行建立身份：ed25519 签名密钥对 + X25519 密钥对。email 留空时
+   * 随机取「形容词的+名词」@主机名。已经建立过就原样返回，不重建密钥——
+   * 换密钥等于换一个身份，别人签给旧身份的信任和加密文件会全部失效。
+   */
+  setup: bind<[string], IdentityInfo>("IdentityService.Setup", (email: string) => [email]),
+  /** Trusted 返回持久信任列表。 */
+  trusted: bind<[], TrustedIdentity[]>("IdentityService.Trusted", () => []),
+  /**
+   * Untrust 从持久信任列表里移除一个指纹，同时清掉本次进程里的「信任一次」。
+   * 移除失败（文件写不了）时列表保持原样：下次读到的还是旧的一份。
+   */
+  untrust: bind<[string], void>("IdentityService.Untrust", (fingerprint: string) => [fingerprint]),
+  /**
+   * Update 只改展示信息（email / id）：指纹与密钥不变，旧签名包的验证不受影响。
+   * 空串表示这一项不动。
+   */
+  update: bind<[string, string], IdentityInfo>("IdentityService.Update", (email: string, id: string) => [email, id]),
 } as const;
 
 // ---- Events ----

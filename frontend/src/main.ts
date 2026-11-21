@@ -2,11 +2,14 @@ import { Channel, onFileDrop } from "mygo-runtime";
 import { runAssertions, type AssertionRule } from "./assert";
 import { mountAssertionsPanel } from "./components/assertionsPanel";
 import { mountAuthEditor } from "./components/authEditor";
+import { mountBandTrustDialog } from "./components/bandTrust";
 import { mountBodyEditor } from "./components/bodyEditor";
 import { mountConfirmDialog } from "./components/closeConfirm";
+import { mountFirstRunDialog } from "./components/firstRun";
 import { mountKVTable } from "./components/kvTable";
 import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
+import { mountSaveDialog } from "./components/saveDialog";
 import { mountScriptEditor } from "./components/scriptEditor";
 import { mountScriptTrustDialog } from "./components/scriptTrust";
 import { mountSettings } from "./components/settings";
@@ -17,8 +20,8 @@ import { createTabs, type TabDef } from "./components/tabs";
 import { mountUrlBar } from "./components/urlBar";
 import { mountWorkspaceSidebar } from "./components/workspaceSidebar";
 import { applyStatic, onLangChange, t } from "./i18n";
-import type { APIRequest, SavedRequest, SSEMessage } from "./mygo";
-import { RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
+import type { APIRequest, SavedRequest, SSEMessage, WorkspaceFile, WorkspaceOpen } from "./mygo";
+import { IdentityService, RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import { isMyGo } from "./runtime";
 import {
   connectSocket,
@@ -52,10 +55,12 @@ import {
   renameFolder,
   renameWorkspace,
   scriptsTrustedInWorkspace,
+  setCachedIdentity,
   setFormFilePath,
   setStreamChannel,
   setVars,
   setWorkspaceDirty,
+  setWorkspaceEncrypted,
   setWorkspacePath,
   snapshotCurrent,
   subscribe,
@@ -406,20 +411,68 @@ const NEW_WORKSPACE_GUARD: UnsavedGuard = {
   noteKey: "dialog.newWorkspaceNote",
 };
 
+// 保存选项弹窗：挑好路径之后问「加密吗、写给谁」。它叠在未保存守卫上面（保存
+// 成功后守卫才继续），所以自带更高的层级。
+const saveDialog = mountSaveDialog();
+
+// 首次运行的身份窗：本机还没有身份时启动就弹，且不能绕过（见组件文件头）。
+const firstRunDialog = mountFirstRunDialog({
+  ready: (identity) => setCachedIdentity(identity),
+});
+
+// 打开的 v2 .band 由未知身份签名时，后端只解到 header 就挂起等用户答复：
+// 「信任一次 / 信任公钥」走 resolveTrust 拿回 WorkspaceFile，「取消」走
+// dismissTrust 丢弃挂起的读盘（不加载）。
+const bandTrustDialog = mountBandTrustDialog({
+  resolve: (fingerprint, remember) => {
+    void (async () => {
+      try {
+        const file = await WorkspaceService.resolveTrust(fingerprint, remember);
+        loadOpened(file);
+      } catch (error) {
+        // 指纹对不上（挂起槽已被别的读盘换掉）或读取失败：中止加载，让用户重开。
+        reportWorkspaceError(error);
+      }
+    })();
+  },
+  dismiss: () => {
+    void WorkspaceService.dismissTrust().catch(() => {
+      // 丢弃挂起数据失败没有补救办法：下次打开会重新挂起一份。
+    });
+  },
+});
+
 function startNewWorkspace(): void {
   clearWorkspaceError();
   newWorkspace();
 }
 
+// 读成功的 .band：选好文件之后才问是否保存（中途取消选择文件不该丢掉当前改动），
+// 这一步与信任弹窗无关——两个入口（对话框、拖入）与 resolveTrust 都汇到这里。
+function loadOpened(file: WorkspaceFile): void {
+  if (file.path === "") return;
+  guardUnsaved(() => {
+    clearWorkspaceError();
+    loadWorkspace(file);
+  }, OPEN_UNSAVED_GUARD);
+}
+
+// Open/OpenPath 的返回有两种形态：file 可以直接加载；trust 说明签发者未知（数据
+// 还没解析，等用户在弹窗里答复）；两个都空 = 用户在文件对话框里取消了。
+function handleOpenResult(result: WorkspaceOpen): void {
+  if (result.file !== undefined) {
+    loadOpened(result.file);
+    return;
+  }
+  if (result.trust !== undefined) bandTrustDialog.open(result.trust);
+}
+
 async function openWorkspace(): Promise<void> {
+  // 信任弹窗挂着时又触发打开：忽略这次（后端只留得下一份挂起的读盘，第二次
+  // 打开会把第一份换掉，正在显示的指纹就对不上了）。
+  if (bandTrustDialog.isOpen()) return;
   try {
-    const file = await WorkspaceService.open();
-    if (file.path === "") return;
-    // 选好文件之后才问是否保存：中途取消选择文件不该丢掉当前改动。
-    guardUnsaved(() => {
-      clearWorkspaceError();
-      loadWorkspace(file);
-    }, OPEN_UNSAVED_GUARD);
+    handleOpenResult(await WorkspaceService.open());
   } catch (error) {
     reportWorkspaceError(error);
   }
@@ -439,18 +492,15 @@ function dropOntoFormField(x: number, y: number, paths: string[]): boolean {
 
 // 拖入的 .band：mygo 原生拖放投递绝对路径，按路径读盘，「保存」直接写回原文件。
 async function openDroppedWorkspace(paths: string[]): Promise<void> {
+  // 信任弹窗挂着时忽略新的拖入（同 openWorkspace：挂起槽只留一份读盘）。
+  if (bandTrustDialog.isOpen()) return;
   const path = paths.find((item) => item.toLowerCase().endsWith(".band"));
   if (path === undefined) {
     reportWorkspaceError(new Error(t("sidebar.droppedNotBand")));
     return;
   }
   try {
-    const file = await WorkspaceService.openPath(path);
-    // 文件读成功才问是否保存：读取失败时当前改动原样保留。
-    guardUnsaved(() => {
-      clearWorkspaceError();
-      loadWorkspace(file);
-    }, OPEN_UNSAVED_GUARD);
+    handleOpenResult(await WorkspaceService.openPath(path));
   } catch (error) {
     reportWorkspaceError(error);
   }
@@ -475,15 +525,32 @@ async function performSave(forceSaveAs: boolean): Promise<boolean> {
   const generation = getWorkspaceGeneration();
   const revision = getWorkspaceRevision();
   try {
-    const path = getWorkspace().path;
-    if (!forceSaveAs && path !== null) {
-      await WorkspaceService.save(path, workspaceData());
-    } else {
-      const saved = await WorkspaceService.saveAs(workspaceData());
-      // 另存为对话框被取消：什么都没写，调用方不能当成已保存。
-      if (saved === "") return false;
-      // 对话框开着时工作区被换掉的话，别把新工作区绑到刚写的文件上。
-      if (getWorkspaceGeneration() === generation) setWorkspacePath(saved);
+    // 有 path 直接用；没有（或用户点了「另存为」）先挑位置。AskSavePath 只挑位置，
+    // 加密与否在后面的保存选项弹窗里定。
+    const current = getWorkspace().path;
+    let path = current;
+    if (path === null || forceSaveAs) {
+      path = await WorkspaceService.askSavePath(getWorkspace().name);
+      // 保存对话框被取消：什么都没写，调用方不能当成已保存。
+      if (path === "") return false;
+      // 挑路径期间工作区被换掉：别把新工作区绑到刚写的文件上，也别拿旧工作区的
+      // 加密状态去问选项。
+      if (getWorkspaceGeneration() !== generation) return false;
+    }
+    const encrypted = getWorkspace().encrypted;
+    const options = await saveDialog.ask({
+      encrypted,
+      // 只有写回当前这份文件才谈得上「沿用原信封」（后端按路径记着它）。
+      canReuse: encrypted && path === current,
+    });
+    // 用户在保存选项里取消了：不写盘。
+    if (options === null) return false;
+    await WorkspaceService.save(path, workspaceData(), options);
+    // 对话框开着时工作区被换掉的话，别把新工作区绑到刚写的文件上。
+    if (getWorkspaceGeneration() === generation) {
+      if (getWorkspace().path !== path) setWorkspacePath(path);
+      // 写进去的信封就是这次的加密选择：加密 = 新信封或沿用的原信封，明文 = 没有。
+      setWorkspaceEncrypted(options.encrypt);
     }
     clearWorkspaceError();
     // 写盘成功了，但期间又有改动（或工作区已经换掉）：脏状态保留，且这次保存
@@ -789,4 +856,15 @@ if (isMyGo()) {
       proceed: closeWindow,
     });
   });
+
+  // 首次运行：本机还没有身份时先问一次（一次性，不可绕过）。取身份只是读一个
+  // 本地文件，失败不阻塞界面——需要身份的功能自己会再报错。
+  void IdentityService.get()
+    .then((identity) => {
+      setCachedIdentity(identity.status === "ready" ? identity : null);
+      if (identity.status === "unset") firstRunDialog.open();
+    })
+    .catch(() => {
+      // 读不到身份（配置目录不可写等）：留给设置页与保存弹窗各自报错。
+    });
 }

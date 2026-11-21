@@ -2,6 +2,7 @@ package ndapi
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
@@ -14,7 +15,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
-	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"

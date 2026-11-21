@@ -2655,3 +2655,280 @@ button:disabled {
 .settings-link:hover {
   text-decoration: underline;
 }
+
+/* ---- 身份：首次运行 / 信任弹窗 / 保存选项 ---- */
+
+/* 信任弹窗与保存选项的内容比三键框宽（签发者信息表、收件人列表） */
+.close-confirm-card.wide {
+  width: min(520px, 100%);
+}
+
+/* 保存选项叠在未保存守卫上面：两者都是 200 的模态层，靠层级分出前后 */
+.close-confirm.stacked {
+  z-index: 210;
+}
+
+.close-confirm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 16px;
+}
+
+.close-confirm-field > span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.close-confirm-field input {
+  height: 30px;
+}
+
+.close-confirm-error {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.close-confirm-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* 签发者信息：ID / 邮箱 / 指纹。指纹用等宽字体，逐字核对 */
+.band-trust-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 16px 0 0;
+  font-size: 12.5px;
+}
+
+.band-trust-meta dt {
+  color: var(--muted);
+}
+
+.band-trust-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+/* 保存选项：加密勾选框 + 收件人列表 */
+.save-options-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.save-recipients {
+  margin-top: 12px;
+}
+
+.save-recipients-title {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.save-recipient-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  margin-top: 6px;
+  overflow-y: auto;
+}
+
+.save-recipient {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.save-recipient-id {
+  color: var(--fg);
+}
+
+.save-recipient-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.save-recipient-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.save-import {
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.save-import:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.save-import:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---- 设置页「身份」分区 ---- */
+
+.identity-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.identity-field {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.identity-field > span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.identity-field input {
+  height: 28px;
+}
+
+.identity-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+
+.identity-btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.identity-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.identity-btn.danger:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.identity-meta {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 8px 8px;
+  margin: 0;
+}
+
+.identity-meta dt {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.identity-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.identity-key {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.identity-key input {
+  height: 28px;
+  font-size: 11.5px;
+}
+
+.identity-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.identity-trusted-title {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.identity-trusted-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.identity-trusted-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.identity-trusted-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.identity-trusted-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-trusted-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.identity-trusted-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}

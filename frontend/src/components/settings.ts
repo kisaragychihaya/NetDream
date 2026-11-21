@@ -18,7 +18,8 @@ import {
   t,
   type LangPref,
 } from "../i18n";
-import { AppService } from "../mygo";
+import { AppService, IdentityService, type IdentityInfo, type TrustedIdentity } from "../mygo";
+import { getCachedIdentity, setCachedIdentity } from "../state";
 import { THEME_MODES, getThemeMode, onThemeChange, setThemeMode, type ThemeMode } from "../theme";
 
 const GITHUB_URL = "https://github.com/kisaragychihaya/NetDream";
@@ -30,7 +31,48 @@ const THEME_LABEL_KEYS: Record<ThemeMode, string> = {
   auto: "settings.interface.themeAuto",
 };
 
-type Section = "interface" | "about";
+// 公钥与指纹的展示长度：指纹取前 16 位（与信任弹窗一致），完整值放 title 与
+// 只读输入框里，方便贴给别人核对。
+const FINGERPRINT_DISPLAY_LENGTH = 16;
+const TRUSTED_FINGERPRINT_LENGTH = 8;
+
+type Section = "interface" | "identity" | "about";
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// 复制公钥：navigator.clipboard 在 webview 里偶尔不可用（没有聚焦、权限被拒），
+// 退回选中文本 + execCommand（与响应区复制同一套兜底）。
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return copyWithSelection(text);
+  }
+}
+
+function copyWithSelection(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.top = "-1000px";
+  area.style.left = "-1000px";
+  document.body.append(area);
+  area.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+
+  area.remove();
+  return copied;
+}
 
 export interface SettingsDialog {
   /** 打开设置页；已经打开时聚焦当前导航项。 */
@@ -61,6 +103,7 @@ export function mountSettings(): SettingsDialog {
   const items = new Map<Section, HTMLButtonElement>();
   for (const [section, key] of [
     ["interface", "settings.interface.title"],
+    ["identity", "settings.identity.title"],
     ["about", "settings.about"],
   ] as const) {
     const item = document.createElement("button");
@@ -131,6 +174,253 @@ export function mountSettings(): SettingsDialog {
 
   fields.append(langField, themeField);
 
+  /* ---- 身份管理：展示信息可改，密钥只读 ---- */
+
+  const identityPanel = document.createElement("div");
+  identityPanel.className = "identity-panel";
+
+  // 展示信息（email / id）可以改：后端只动传了非空的那一项，指纹与密钥不变。
+  const emailInput = document.createElement("input");
+  emailInput.type = "email";
+  emailInput.spellcheck = false;
+  emailInput.autocomplete = "off";
+  emailInput.id = "identity-email";
+
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.spellcheck = false;
+  idInput.autocomplete = "off";
+  idInput.id = "identity-id";
+
+  const makeSaveButton = (): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "identity-btn";
+    button.textContent = t("settings.identity.save");
+    button.dataset.i18n = "settings.identity.save";
+    return button;
+  };
+
+  const emailSave = makeSaveButton();
+  const idSave = makeSaveButton();
+
+  const fieldRow = (labelKey: string, input: HTMLInputElement, save: HTMLButtonElement): HTMLElement => {
+    const row = document.createElement("div");
+    row.className = "identity-field";
+    const label = document.createElement("span");
+    label.textContent = t(labelKey);
+    label.dataset.i18n = labelKey;
+    row.append(label, input, save);
+    return row;
+  };
+
+  const identityMeta = document.createElement("dl");
+  identityMeta.className = "identity-meta";
+
+  const addMetaRow = (labelKey: string): HTMLElement => {
+    const term = document.createElement("dt");
+    term.textContent = t(labelKey);
+    term.dataset.i18n = labelKey;
+    const value = document.createElement("dd");
+    identityMeta.append(term, value);
+    return value;
+  };
+
+  const fingerprintValue = addMetaRow("settings.identity.fingerprint");
+  fingerprintValue.classList.add("mono");
+
+  const copyButtons: HTMLButtonElement[] = [];
+
+  // 公钥行：只读输入框（完整 base64）+「复制」。
+  const addKeyRow = (labelKey: string): HTMLInputElement => {
+    const value = addMetaRow(labelKey);
+    const holder = document.createElement("div");
+    holder.className = "identity-key";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.readOnly = true;
+    input.className = "mono";
+    input.spellcheck = false;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "identity-btn";
+    copy.textContent = t("common.copy");
+    copy.title = t("common.copy");
+    copy.addEventListener("click", () => {
+      void (async () => {
+        if (input.value === "") return;
+        const copied = await copyText(input.value);
+        copy.textContent = copied ? t("common.copied") : t("common.copyFailed");
+        copy.title = copy.textContent;
+        window.setTimeout(() => {
+          copy.textContent = t("common.copy");
+          copy.title = t("common.copy");
+        }, 1500);
+      })();
+    });
+    copyButtons.push(copy);
+    holder.append(input, copy);
+    value.append(holder);
+    return input;
+  };
+
+  const ed25519Input = addKeyRow("settings.identity.ed25519");
+  const ecdhInput = addKeyRow("settings.identity.ecdh");
+
+  const identityError = document.createElement("p");
+  identityError.className = "identity-error";
+  identityError.hidden = true;
+
+  const trustedTitle = document.createElement("div");
+  trustedTitle.className = "identity-trusted-title";
+  trustedTitle.textContent = t("settings.identity.trusted");
+  trustedTitle.dataset.i18n = "settings.identity.trusted";
+
+  const trustedList = document.createElement("div");
+  trustedList.className = "identity-trusted-list";
+
+  identityPanel.append(
+    fieldRow("settings.identity.email", emailInput, emailSave),
+    fieldRow("settings.identity.id", idInput, idSave),
+    identityMeta,
+    identityError,
+    trustedTitle,
+    trustedList,
+  );
+
+  let identity: IdentityInfo | null = getCachedIdentity();
+  let trusted: TrustedIdentity[] = [];
+
+  const showIdentityError = (message: string | null): void => {
+    identityError.hidden = message === null;
+    identityError.textContent = message ?? "";
+  };
+
+  const renderIdentity = (): void => {
+    const ready = identity !== null;
+    // 还没建立身份：输入框留空且不可编辑，需要的话从首次运行窗里建立。
+    emailInput.value = identity?.email ?? "";
+    idInput.value = identity?.id ?? "";
+    ed25519Input.value = identity?.ed25519 ?? "";
+    ecdhInput.value = identity?.ecdh ?? "";
+    fingerprintValue.textContent = (identity?.fingerprint ?? "").slice(0, FINGERPRINT_DISPLAY_LENGTH);
+    fingerprintValue.title = identity?.fingerprint ?? "";
+    for (const button of [emailSave, idSave]) button.disabled = !ready;
+    emailInput.disabled = !ready;
+    idInput.disabled = !ready;
+    for (const button of copyButtons) button.disabled = !ready;
+  };
+
+  const renderTrusted = (): void => {
+    if (trusted.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "identity-trusted-empty";
+      empty.textContent = t("settings.identity.trustedEmpty");
+      trustedList.replaceChildren(empty);
+      return;
+    }
+    trustedList.replaceChildren(
+      ...trusted.map((row) => {
+        const line = document.createElement("div");
+        line.className = "identity-trusted-row";
+
+        const text = document.createElement("span");
+        text.className = "identity-trusted-text";
+        const name = document.createElement("span");
+        name.className = "identity-trusted-name";
+        // 对方给的展示信息不可信但只是展示：一律 textContent。
+        name.textContent = row.email !== "" ? row.email : row.id;
+        const meta = document.createElement("span");
+        meta.className = "identity-trusted-meta";
+        const fingerprint = document.createElement("span");
+        fingerprint.className = "mono";
+        fingerprint.textContent = row.fingerprint.slice(0, TRUSTED_FINGERPRINT_LENGTH);
+        fingerprint.title = row.fingerprint;
+        meta.append(row.id !== "" && row.id !== row.email ? `${row.id} · ` : "", fingerprint);
+        text.append(name, meta);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "identity-btn danger";
+        remove.textContent = t("settings.identity.remove");
+        remove.addEventListener("click", () => {
+          remove.disabled = true;
+          void (async () => {
+            try {
+              await IdentityService.untrust(row.fingerprint);
+              trusted = trusted.filter((item) => item.fingerprint !== row.fingerprint);
+              showIdentityError(null);
+            } catch (cause) {
+              showIdentityError(t("settings.identity.untrustFailed", { error: messageOf(cause) }));
+            }
+            renderTrusted();
+          })();
+        });
+
+        line.append(text, remove);
+        return line;
+      }),
+    );
+  };
+
+  // 拉一次身份与信任列表：打开设置页时、以及信任列表被改动后。
+  const refreshIdentity = (): void => {
+    void (async () => {
+      try {
+        const next = await IdentityService.get();
+        identity = next.status === "ready" ? next : null;
+        setCachedIdentity(identity);
+        showIdentityError(null);
+      } catch (cause) {
+        showIdentityError(t("settings.identity.loadFailed", { error: messageOf(cause) }));
+      }
+      renderIdentity();
+      try {
+        trusted = await IdentityService.trusted();
+      } catch (cause) {
+        trusted = [];
+        showIdentityError(t("settings.identity.loadFailed", { error: messageOf(cause) }));
+      }
+      renderTrusted();
+    })();
+  };
+
+  const saveField = (field: "email" | "id", button: HTMLButtonElement): void => {
+    if (identity === null) return;
+    const email = field === "email" ? emailInput.value.trim() : "";
+    const id = field === "id" ? idInput.value.trim() : "";
+    // 空串后端按「这一项不动」处理：没改就别白跑一次。
+    if ((field === "email" ? email : id) === "") return;
+    button.disabled = true;
+    void (async () => {
+      try {
+        const next = await IdentityService.update(email, id);
+        identity = next.status === "ready" ? next : null;
+        setCachedIdentity(identity);
+        showIdentityError(null);
+      } catch (cause) {
+        showIdentityError(t("settings.identity.saveFailed", { error: messageOf(cause) }));
+      }
+      renderIdentity();
+    })();
+  };
+
+  emailSave.addEventListener("click", () => saveField("email", emailSave));
+  idSave.addEventListener("click", () => saveField("id", idSave));
+  emailInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    saveField("email", emailSave);
+  });
+  idInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    saveField("id", idSave);
+  });
+
+  renderIdentity();
+  renderTrusted();
+
   /* ---- 关于 ---- */
 
   const title = document.createElement("h1");
@@ -174,12 +464,13 @@ export function mountSettings(): SettingsDialog {
 
   const panels = new Map<Section, HTMLElement[]>([
     ["interface", [fields]],
+    ["identity", [identityPanel]],
     ["about", [title, logo, tagline, meta]],
   ]);
 
   let section: Section = "interface";
 
-  // 两页的节点都是现成的：切页只换容器里的孩子，不重建（重建会打断语言下拉本身）。
+  // 三页的节点都是现成的：切页只换容器里的孩子，不重建（重建会打断语言下拉本身）。
   const showSection = (next: Section): void => {
     section = next;
     for (const [id, item] of items) {
@@ -190,6 +481,8 @@ export function mountSettings(): SettingsDialog {
     // 换页时节点刚从脱离状态挂回来：data-i18n 标注按当前语言补刷一次
     //（脱离期间切语言，applyStatic 找不到它们）。
     applyStatic();
+    // 身份区显示的是后端此刻的状态：信任列表可能被别处改过，进页就重取一次。
+    if (next === "identity") refreshIdentity();
   };
 
   for (const [id, item] of items) {
@@ -233,11 +526,19 @@ export function mountSettings(): SettingsDialog {
     if (next !== undefined) setThemeMode(next);
   });
 
-  // 切语言：静态文案由 applyStatic() 刷新，这里重建两个下拉的选项文案，
-  // 并同步版本号兜底文案（它是运行时按语言取的，不在静态标注里）。
+  // 切语言：静态文案由 applyStatic() 刷新，这里重建两个下拉的选项文案、
+  // 身份区的信任列表（行内文案是现取的），并同步版本号兜底文案（它是运行时按
+  // 语言取的，不在静态标注里）。
   onLangChange(() => {
     fillLangOptions();
     fillThemeOptions();
+    renderTrusted();
+    // 公钥的「复制」按钮文案不在 data-i18n 标注里（点一下会临时变成「已复制」），
+    // 这里按当前语言复原一次。
+    for (const button of copyButtons) {
+      button.textContent = t("common.copy");
+      button.title = t("common.copy");
+    }
     if (versionMissing) version.textContent = t("settings.versionUnknown");
   });
 
@@ -263,6 +564,9 @@ export function mountSettings(): SettingsDialog {
     open: () => {
       overlay.hidden = false;
       loadVersion();
+      // 打开设置就取一次身份：首次运行窗关掉后、或身份在别处改过，这里看到的是
+      // 后端当前的值，而不是上次留在界面上的。
+      refreshIdentity();
       items.get(section)?.focus();
     },
   };
