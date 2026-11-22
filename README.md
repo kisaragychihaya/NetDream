@@ -6,7 +6,7 @@
 
 English: [README.en.md](README.en.md)
 
-NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，系统 webview 渲染界面——没有 Electron，没有云端，没有账号，完全离线。
+NetDream 是一个跑在桌面上的 API 自动化测试与调试工具：Go 后端直接发包，系统 webview 渲染界面——没有 Electron，没有云端，没有账号，完全离线。
 
 ~~解压完才50M，我的内存和硬盘再也不会咕咕嘎嘎啦~~
 
