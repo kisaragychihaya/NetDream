@@ -98,7 +98,14 @@ func scriptText(text string) string {
 // back into req. The outcome is never nil: a script that fails halfway still
 // reports the console lines and tests it produced, with the variables as they
 // came in.
-func runPreScript(ctx context.Context, code string, req *APIRequest, vars map[string]string) (out *scriptOutcome, err error) {
+func runPreScript(ctx context.Context, code string, req *APIRequest, vars map[string]string) (*scriptOutcome, error) {
+	return runPreScriptWithin(ctx, code, req, vars, scriptTimeout)
+}
+
+// runPreScriptWithin is runPreScript with the caller's own deadline: a composer
+// call decides how long an entry's own script may take, while a hook keeps
+// scriptTimeout.
+func runPreScriptWithin(ctx context.Context, code string, req *APIRequest, vars map[string]string, timeout time.Duration) (out *scriptOutcome, err error) {
 	out = &scriptOutcome{vars: vars}
 	var run *scriptRun
 	defer func() {
@@ -106,12 +113,12 @@ func runPreScript(ctx context.Context, code string, req *APIRequest, vars map[st
 			if run != nil {
 				out = run.outcome(vars)
 			}
-			err = scriptFailure(preScriptKind, panicError(r))
+			err = scriptFailureWithin(preScriptKind, panicError(r), timeout)
 		}
 	}()
 
 	run = newScriptRun(preScriptKind, req, nil, vars)
-	if runErr := run.execute(ctx, code); runErr != nil {
+	if runErr := run.executeWithin(ctx, code, timeout); runErr != nil {
 		return run.outcome(vars), runErr
 	}
 	run.applyRequest(req)
@@ -120,7 +127,12 @@ func runPreScript(ctx context.Context, code string, req *APIRequest, vars map[st
 
 // runPostScript runs code against the request and the response it produced.
 // Nothing it does reaches the request: a post script is a read-only view.
-func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string) (out *scriptOutcome, err error) {
+func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string) (*scriptOutcome, error) {
+	return runPostScriptWithin(ctx, code, req, resp, vars, scriptTimeout)
+}
+
+// runPostScriptWithin is runPostScript with the caller's own deadline.
+func runPostScriptWithin(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string, timeout time.Duration) (out *scriptOutcome, err error) {
 	out = &scriptOutcome{vars: vars}
 	var run *scriptRun
 	defer func() {
@@ -128,12 +140,12 @@ func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIR
 			if run != nil {
 				out = run.outcome(vars)
 			}
-			err = scriptFailure(postScriptKind, panicError(r))
+			err = scriptFailureWithin(postScriptKind, panicError(r), timeout)
 		}
 	}()
 
 	run = newScriptRun(postScriptKind, req, resp, vars)
-	if runErr := run.execute(ctx, code); runErr != nil {
+	if runErr := run.executeWithin(ctx, code, timeout); runErr != nil {
 		return run.outcome(vars), runErr
 	}
 	return run.outcome(run.exportedVars()), nil
@@ -156,9 +168,20 @@ func newScriptRun(kind string, req *APIRequest, resp *APIResponse, vars map[stri
 // shared helpers a script reaches for whatever it runs for. A hook attaches the
 // views it adds (nd.request, nd.response, nd.message) on top.
 func newScriptRunBase(kind string, vars map[string]string) *scriptRun {
+	return newScriptRunReport(kind, vars, nil)
+}
+
+// newScriptRunReport builds the same runtime with a recorder of the caller's
+// choosing: a composer run passes each line on as it happens, so it keeps the
+// bookkeeping itself instead of leaving it to the run. A nil report records into
+// the run, like a hook.
+func newScriptRunReport(kind string, vars map[string]string, report ndapi.Recorder) *scriptRun {
 	vm := goja.New()
 	run := &scriptRun{vm: vm, kind: kind}
-	run.api = ndapi.NewRun(vm, vars, run)
+	if report == nil {
+		report = run
+	}
+	run.api = ndapi.NewRun(vm, vars, report)
 
 	nd := vm.NewObject()
 	_ = nd.Set("vars", run.api.VarsGlobal())
@@ -215,13 +238,20 @@ func scriptPairs(list []KeyValue) []ndapi.Pair {
 
 // execute runs code with the timeout and the page's lifetime both able to stop
 // it, and turns whatever the runtime throws into an error.
-func (run *scriptRun) execute(ctx context.Context, code string) (err error) {
+func (run *scriptRun) execute(ctx context.Context, code string) error {
+	return run.executeWithin(ctx, code, scriptTimeout)
+}
+
+// executeWithin is execute with the run's own deadline: a hook gets
+// scriptTimeout, while a composer run legitimately waits on the requests it
+// calls and gets however long the page allowed.
+func (run *scriptRun) executeWithin(ctx context.Context, code string, timeout time.Duration) (err error) {
 	vm := run.vm
 
 	// One deadline for both ways a run can stop: the vm interrupt below covers
 	// code that stays in JS, and the same context reaches the Go-side calls
 	// (nd.crypto.pbkdf2) that an interrupt cannot touch.
-	runCtx, cancel := context.WithTimeout(ctx, scriptTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	run.api.BindContext(runCtx)
 
@@ -249,12 +279,12 @@ func (run *scriptRun) execute(ctx context.Context, code string) (err error) {
 	}()
 	defer func() {
 		if r := recover(); r != nil {
-			err = scriptFailure(run.kind, panicError(r))
+			err = scriptFailureWithin(run.kind, panicError(r), timeout)
 		}
 	}()
 
 	if _, runErr := vm.RunString(code); runErr != nil {
-		return scriptFailure(run.kind, runErr)
+		return scriptFailureWithin(run.kind, runErr, timeout)
 	}
 	return nil
 }
@@ -272,16 +302,26 @@ func (run *scriptRun) limitedLogs() []ScriptLog {
 	if run.droppedLogs == 0 && run.droppedTests == 0 {
 		return run.logs
 	}
-	notes := make([]string, 0, 2)
-	if run.droppedLogs > 0 {
-		notes = append(notes, fmt.Sprintf("console 输出超过 %d 条，其余 %d 条未保留", scriptMaxLogs, run.droppedLogs))
-	}
-	if run.droppedTests > 0 {
-		notes = append(notes, fmt.Sprintf("nd.test 结果超过 %d 条，其余 %d 条未保留", scriptMaxTests, run.droppedTests))
-	}
 	logs := make([]ScriptLog, len(run.logs), len(run.logs)+1)
 	copy(logs, run.logs)
-	return append(logs, ScriptLog{Level: "warn", Text: strings.Join(notes, "；"), At: time.Now().UnixMilli()})
+	return append(logs, ScriptLog{
+		Level: "warn",
+		Text:  overrunNotes(run.droppedLogs, run.droppedTests),
+		At:    time.Now().UnixMilli(),
+	})
+}
+
+// overrunNotes says what the retention limits dropped, so the page says why
+// output stops where it does instead of just ending early.
+func overrunNotes(droppedLogs, droppedTests int) string {
+	notes := make([]string, 0, 2)
+	if droppedLogs > 0 {
+		notes = append(notes, fmt.Sprintf("console 输出超过 %d 条，其余 %d 条未保留", scriptMaxLogs, droppedLogs))
+	}
+	if droppedTests > 0 {
+		notes = append(notes, fmt.Sprintf("nd.test 结果超过 %d 条，其余 %d 条未保留", scriptMaxTests, droppedTests))
+	}
+	return strings.Join(notes, "；")
 }
 
 // exportedVars is the variable set the script left behind: whatever is in
@@ -435,6 +475,12 @@ func stringField(v goja.Value) string {
 
 // scriptFailure turns a goja error into the message the page shows.
 func scriptFailure(kind string, err error) error {
+	return scriptFailureWithin(kind, err, scriptTimeout)
+}
+
+// scriptFailureWithin is scriptFailure for a run whose deadline is not the
+// hook's scriptTimeout: the message names the deadline it actually missed.
+func scriptFailureWithin(kind string, err error, timeout time.Duration) error {
 	// A Go-side call that stopped because the run ended reports the same two
 	// messages a vm interrupt does; the run is over either way.
 	var aborted *ndapi.AbortError
@@ -442,12 +488,12 @@ func scriptFailure(kind string, err error) error {
 		if aborted.Canceled {
 			return fmt.Errorf("%s已取消", kind)
 		}
-		return fmt.Errorf("%s超时：超过 %s 未执行完，已中断", kind, scriptTimeout)
+		return fmt.Errorf("%s超时：超过 %s 未执行完，已中断", kind, timeout)
 	}
 	var interrupted *goja.InterruptedError
 	if errors.As(err, &interrupted) {
 		if reason, ok := interrupted.Value().(string); ok && reason == scriptTimeoutReason {
-			return fmt.Errorf("%s超时：超过 %s 未执行完，已中断", kind, scriptTimeout)
+			return fmt.Errorf("%s超时：超过 %s 未执行完，已中断", kind, timeout)
 		}
 		return fmt.Errorf("%s已取消", kind)
 	}

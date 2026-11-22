@@ -13,13 +13,14 @@
 
 import { getLang, onLangChange, t, type Lang } from "./i18n";
 
-/** 五个脚本钩子：HTTP 的预执行/后执行，连接类 kind 的预连接/发送/接收。 */
+/** 六个脚本钩子：HTTP 的预执行/后执行，连接类 kind 的预连接/发送/接收，Composer 编排。 */
 export type ScriptExampleContext =
   | "http-pre"
   | "http-post"
   | "socket-pre"
   | "socket-send"
-  | "socket-receive";
+  | "socket-receive"
+  | "composer";
 
 /** 一份三语文案。 */
 type Text = Record<Lang, string>;
@@ -486,6 +487,125 @@ try {
 } catch (e) {
   // JSON ではないメッセージなので無視します
 }
+`,
+      },
+    },
+  ],
+
+  composer: [
+    {
+      name: {
+        "zh-CN": "串行调用两个请求并断言状态码",
+        "en-US": "Call two requests in order and assert their status",
+        ja: "2 つのリクエストを順に呼び、ステータスを検証",
+      },
+      code: {
+        "zh-CN": `// 请求名 = 左侧工作区里的条目名；串行调用，单个请求出错不中断整段脚本。
+let login = null;
+try {
+  login = nd.composer.run("登录");
+  console.log("登录", login.status);
+} catch (e) {
+  console.error("调用「登录」失败：" + e);
+}
+nd.test("登录返回 2xx", () =>
+  nd.assert(Boolean(login) && login.status < 300, "status=" + (login ? login.status : "无")),
+);
+
+try {
+  const list = nd.composer.run("用户列表");
+  nd.test("列表返回 200", () => nd.assert(list.status === 200, "status=" + list.status));
+} catch (e) {
+  nd.test("列表返回 200", () => nd.assert(false, String(e)));
+}
+`,
+        "en-US": `// The name is a workspace entry on the left; calls run one after another and a failure does not stop the script.
+let login = null;
+try {
+  login = nd.composer.run("Login");
+  console.log("Login", login.status);
+} catch (e) {
+  console.error("Calling Login failed: " + e);
+}
+nd.test("Login returns 2xx", () =>
+  nd.assert(Boolean(login) && login.status < 300, "status=" + (login ? login.status : "none")),
+);
+
+try {
+  const list = nd.composer.run("User list");
+  nd.test("List returns 200", () => nd.assert(list.status === 200, "status=" + list.status));
+} catch (e) {
+  nd.test("List returns 200", () => nd.assert(false, String(e)));
+}
+`,
+        ja: `// 名前は左側ワークスペースの項目名です。順に呼び出し、1 つの失敗でスクリプト全体は止まりません。
+let login = null;
+try {
+  login = nd.composer.run("ログイン");
+  console.log("ログイン", login.status);
+} catch (e) {
+  console.error("「ログイン」の呼び出しに失敗: " + e);
+}
+nd.test("ログインが 2xx", () =>
+  nd.assert(Boolean(login) && login.status < 300, "status=" + (login ? login.status : "なし")),
+);
+
+try {
+  const list = nd.composer.run("ユーザー一覧");
+  nd.test("一覧が 200", () => nd.assert(list.status === 200, "status=" + list.status));
+} catch (e) {
+  nd.test("一覧が 200", () => nd.assert(false, String(e)));
+}
+`,
+      },
+    },
+    {
+      name: {
+        "zh-CN": "登录 token 写进变量并带在后续调用里",
+        "en-US": "Store the login token and pass it to later calls",
+        ja: "ログインの token を変数に入れて次の呼び出しに渡す",
+      },
+      code: {
+        "zh-CN": `// 登录拿 token 写进变量，后面的请求用 options.vars 覆盖这次调用的变量。
+const login = nd.composer.run("登录");
+const token = login.json().token;
+nd.vars.set("token", token);
+console.log("已写入变量 token");
+
+// options.vars 是单次覆盖：这次调用在变量池的副本上跑，{{token}} 与被调条目的
+// 脚本都取到它，调用结束后变量池保持原样（脚本写下的值仍会随变量表写回）。
+const profile = nd.composer.run("我的资料", {
+  vars: { token: token, client: "netdream" },
+});
+nd.test("资料接口 2xx", () => nd.assert(profile.status < 300, "status=" + profile.status));
+`,
+        "en-US": `// Keep the login token as a variable, then hand it to the next call through options.vars.
+const login = nd.composer.run("Login");
+const token = login.json().token;
+nd.vars.set("token", token);
+console.log("Stored variable token");
+
+// options.vars is a per-call override: this call runs on a copy of the variable pool,
+// so {{token}} and the called entry's script see it, and the pool is left as it was
+// afterwards (what the script itself wrote is still written back).
+const profile = nd.composer.run("My profile", {
+  vars: { token: token, client: "netdream" },
+});
+nd.test("Profile returns 2xx", () => nd.assert(profile.status < 300, "status=" + profile.status));
+`,
+        ja: `// ログインで得た token を変数に入れ、次の呼び出しには options.vars で渡します。
+const login = nd.composer.run("ログイン");
+const token = login.json().token;
+nd.vars.set("token", token);
+console.log("変数 token を保存しました");
+
+// options.vars はこの呼び出しだけの上書きです。変数プールの複製で実行されるため、
+// {{token}} も呼ばれた項目のスクリプトもこの値を見ますが、呼び出し後にプールは
+// 元のままです（スクリプト自身が書いた値は変数表へ書き戻されます）。
+const profile = nd.composer.run("プロフィール", {
+  vars: { token: token, client: "netdream" },
+});
+nd.test("プロフィールが 2xx", () => nd.assert(profile.status < 300, "status=" + profile.status));
 `,
       },
     },

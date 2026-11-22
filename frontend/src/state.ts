@@ -27,8 +27,19 @@ const SAVE_DELAY_MS = 300;
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
 
-/** 编辑器类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接、gRPC 调用、Markdown 文档。 */
-export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio", "grpc", "markdown"] as const;
+/**
+ * 编辑器类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接、gRPC 调用、
+ * Composer 自动化编排、Markdown 文档。
+ */
+export const REQUEST_KINDS = [
+  "http",
+  "websocket",
+  "tcp",
+  "socketio",
+  "grpc",
+  "composer",
+  "markdown",
+] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 /** WS/Socket.IO 消息模板的类型（SavedMessage.msgType）。 */
@@ -122,6 +133,11 @@ export interface RequestState {
   receiveScript: string;
   /** kind="markdown" 的文档内容；其余 kind 恒为空串。 */
   markdown: string;
+  /**
+   * kind="composer" 的编排脚本（JS，goja 运行）：串行调用工作区里的请求、断言、
+   * 写变量；其余 kind 恒为空串。
+   */
+  composerScript: string;
   /** 响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。 */
   examples: SavedExample[];
 }
@@ -209,6 +225,7 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     sendScript: "",
     receiveScript: "",
     markdown: "",
+    composerScript: "",
     examples: [],
   };
 }
@@ -754,6 +771,7 @@ function hydrate(source: Record<string, unknown>): RequestState {
     sendScript: text(source.sendScript),
     receiveScript: text(source.receiveScript),
     markdown: text(source.markdown),
+    composerScript: text(source.composerScript),
     examples: hydrateExamples(source.examples),
   };
 }
@@ -951,6 +969,7 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     sendScript: text(saved.sendScript),
     receiveScript: text(saved.receiveScript),
     markdown: text(saved.markdown),
+    composerScript: text(saved.composerScript),
     examples: saved.examples.map((example) => ({ ...example })),
   };
 }
@@ -971,13 +990,17 @@ export function getWorkspaceGeneration(): number {
   return workspaceGeneration;
 }
 
-/** 工作区里是否有任何条目带脚本（HTTP 前后脚本或连接类的三个脚本）。 */
+/** 工作区里是否有任何条目带脚本（HTTP 前后脚本、连接类的三个脚本或 Composer 编排脚本）。 */
 function workspaceHasScripts(): boolean {
   // 字段缺失一律按空串算：旧 .band 里没有连接脚本字段，手工改过的文件也可能缺。
   return workspace.entries.some((entry) =>
-    [entry.preScript, entry.postScript, entry.sendScript, entry.receiveScript].some(
-      (value) => typeof value === "string" && value.trim() !== "",
-    ),
+    [
+      entry.preScript,
+      entry.postScript,
+      entry.sendScript,
+      entry.receiveScript,
+      entry.composerScript,
+    ].some((value) => typeof value === "string" && value.trim() !== ""),
   );
 }
 
@@ -1045,14 +1068,14 @@ export function newRequest(kind: RequestKind = "http"): void {
 }
 
 /**
- * 新建一条未命名 Markdown 文档并入册：文档没有「发送」动作，创建即出现在
- * 工作区列表里（可当场双击或顶栏改名），编辑内容随保存工作区快照落盘。
+ * 文档类条目（Markdown / Composer）的零值快照：创建即入册，字段全部留空，
+ * 名字留空由界面按当前语言给「未命名文档 / 未命名 Composer」。
  */
-export function newMarkdownDocument(): void {
-  const entry: SavedRequest = {
+function blankDocumentEntry(kind: RequestKind): SavedRequest {
+  return {
     id: newId(),
     name: "",
-    kind: "markdown",
+    kind,
     method: "",
     url: "",
     params: [],
@@ -1084,12 +1107,32 @@ export function newMarkdownDocument(): void {
     sendScript: "",
     receiveScript: "",
     markdown: "",
+    composerScript: "",
     examples: [],
   };
+}
+
+// 文档类条目没有「发送」动作，沿用请求的「执行后才收编」规则会无处可改名，
+// 所以创建即入册：currentId 指向新条目、置脏，用户当场就能改名。
+function addDocumentEntry(kind: RequestKind): void {
+  const entry = blankDocumentEntry(kind);
   workspace.entries = [...workspace.entries, entry];
   workspace.currentId = entry.id;
   applyRequest(requestFromSaved(entry));
   markWorkspaceDirty();
+}
+
+/**
+ * 新建一条未命名 Markdown 文档并入册：文档没有「发送」动作，创建即出现在
+ * 工作区列表里（可当场双击或顶栏改名），编辑内容随保存工作区快照落盘。
+ */
+export function newMarkdownDocument(): void {
+  addDocumentEntry("markdown");
+}
+
+/** 新建一条未命名 Composer 编排并入册（语义同 newMarkdownDocument）。 */
+export function newComposerDocument(): void {
+  addDocumentEntry("composer");
 }
 
 export function loadEntry(id: string): void {
@@ -1121,11 +1164,12 @@ export function renameEntry(id: string, name: string): void {
 }
 
 /**
- * 给当前 Markdown 文档改名。文档还没入册时（典型：应用重启后会话从本地快照
- * 恢复、内存工作区是空的）先收编成一条新条目再改，名字不再静默丢失。
+ * 给当前文档（Markdown 文档 / Composer 编排）改名。文档还没入册时（典型：应用
+ * 重启后会话从本地快照恢复、内存工作区是空的）先收编成一条新条目再改，名字
+ * 不再静默丢失。
  */
-export function renameCurrentMarkdown(name: string): void {
-  if (request.kind !== "markdown") return;
+export function renameCurrentDocument(name: string): void {
+  if (request.kind !== "markdown" && request.kind !== "composer") return;
   if (workspace.currentId === null) {
     upsertEntry(snapshotCurrent());
   }
@@ -1241,9 +1285,9 @@ const KIND_PREFIX: Partial<Record<RequestKind, string>> = {
 };
 
 function generatedName(kind: RequestKind, method: string, url: string): string {
-  // Markdown 文档不参与自动命名：没有 URL 可推导，空名由界面按语言给
-  // 「未命名文档」（与工作区空名的显示约定一致）。
-  if (kind === "markdown") return "";
+  // Markdown 文档与 Composer 编排不参与自动命名：没有 URL 可推导，空名由界面按
+  // 语言给「未命名文档 / 未命名 Composer」（与工作区空名的显示约定一致）。
+  if (kind === "markdown" || kind === "composer") return "";
   const target = url.trim();
   // tcp/grpc 的地址就是 host:port，不能过 URL 解析——"api.example.com:50051"
   // 会被当成 scheme，host 为空，名字里只剩端口。
@@ -1341,6 +1385,7 @@ export function snapshotCurrent(): SavedRequest {
     sendScript: state.sendScript,
     receiveScript: state.receiveScript,
     markdown: state.markdown,
+    composerScript: state.composerScript,
     examples: state.examples.map((example) => ({ ...example })),
   };
 }

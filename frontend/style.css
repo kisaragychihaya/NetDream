@@ -3313,3 +3313,106 @@ button:disabled {
   background: var(--accent-soft);
   color: var(--accent);
 }
+
+/* ---- Composer 自动化编排 ---- */
+
+/* 工作区列表里的类型徽标：靛蓝，与 WS/TCP/IO/RPC/MD 都区分得开 */
+.m-badge.m-cmp {
+  color: #4f46e5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] .m-badge.m-cmp {
+    color: #a5b4fc;
+  }
+}
+
+:root[data-theme="dark"] .m-badge.m-cmp {
+  color: #a5b4fc;
+}
+
+/* 顶栏的超时输入：label + 数字框挤在 32px 高的一行里 */
+.composer-timeout {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.composer-timeout[hidden] {
+  display: none;
+}
+
+.composer-timeout input {
+  width: 62px;
+  height: 32px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* 编排页没有页签，整页给脚本编辑器（比各脚本页的固定高度高一些） */
+.req-view[data-view="composer"] {
+  height: 100%;
+  min-height: 0;
+}
+
+.req-view[data-view="composer"] .script-editor {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 200px;
+}
+
+/* 控制台行的类型徽标着色：日志灰、断言蓝、请求绿、汇总橙（系统行用默认灰） */
+.cmp-row.log .sock-dir {
+  background: var(--hover);
+  color: var(--muted);
+}
+
+.cmp-row.test .sock-dir {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cmp-row.request .sock-dir {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.cmp-row.done .sock-dir {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+/* 汇总行：统计数字常规色，失败原因单独红字 */
+.cmp-reason {
+  flex: none;
+  max-width: 40%;
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 请求结束行的耗时 */
+.cmp-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Composer 与 gRPC 一样走 Socket 响应区：整块只留一列，右侧断言栏不占位 */
+#response-pane[data-kind="composer"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 编排运行中的状态徽标配橙色（idle / done 用默认灰） */
+.sock-state[data-state="running"] {
+  background: var(--orange-soft);
+  color: var(--orange);
+}

@@ -73,6 +73,55 @@ export interface AuthInfo {
   token: string;
 }
 
+/** ComposerEvent 是运行过程的一条事件，Run 存续期间经 stream 推送。 */
+export interface ComposerEvent {
+  /** "log" | "test" | "request" | "done" */
+  type: string;
+  /** Unix 毫秒 */
+  at: number;
+  /** log："log"|"warn"|"error" */
+  level?: string;
+  text?: string;
+  /** test：断言名 */
+  name?: string;
+  pass?: boolean;
+  error?: string;
+  /** request：调用条目标记（Phase "start"|"end"；end 带 Status/TimeMS/Error） */
+  phase?: string;
+  request?: string;
+  status?: number;
+  timeMS?: number;
+  /** done：汇总（Reason：脚本错误/超时/取消的描述；正常完成为空） */
+  tests?: number;
+  passed?: number;
+  failed?: number;
+  reason?: string;
+  /** Vars 是 done 时变量全量快照（前端无条件下发写回，同 HTTP 语义）；其余事件为 nil。 */
+  vars?: Record<string, string>;
+}
+
+/** ComposerResult 是一次运行的产物：与 done 事件带的是同一组计数与原因。 */
+export interface ComposerResult {
+  tests: number;
+  passed: number;
+  failed: number;
+  reason: string;
+}
+
+/** ComposerRunParams 发起一次自动化运行：goja 脚本经 nd.composer.run 调用工作区条目。 */
+export interface ComposerRunParams {
+  /** 运行 id（前端生成）；Stop 凭它定位 */
+  id: string;
+  /** composer 脚本（goja） */
+  script: string;
+  /** 工作区条目快照（前端已剔除 examples 等重字段） */
+  requests: SavedRequest[];
+  /** 变量快照：{{var}} 与 nd.vars 数据源 */
+  vars: Record<string, string>;
+  /** 秒；0 = 默认 60（整个运行，含所有被调请求） */
+  timeout: number;
+}
+
 /** FormField is one field of a multipart/form-data body. */
 export interface FormField {
   key: string;
@@ -337,6 +386,8 @@ export interface SavedRequest {
   sendScript: string;
   /** 接收消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无 */
   receiveScript: string;
+  /** composer 自动化脚本（goja，nd.composer API）；仅 kind="composer" 使用，空 = 无 */
+  composerScript: string;
   assertions: SavedAssertion[];
   /** WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求） */
   messages: SavedMessage[];
@@ -658,6 +709,26 @@ export const GrpcService = {
   list: bind<[GrpcListParams], GrpcServiceInfo[]>("GrpcService.List", (params: GrpcListParams) => [params]),
   /** Send writes one request message to the streaming call id names. */
   send: bind<[string, string], void>("GrpcService.Send", (id: string, payload: string) => [id, payload]),
+} as const;
+
+/**
+ * ComposerService runs composer scripts: one goja script that calls the
+ * workspace's own requests through nd.composer.run, one after another, sharing
+ * one variable pool. Every exported method here is bound to the frontend, so
+ * helpers stay unexported.
+ */
+export const ComposerService = {
+  /**
+   * Run performs one run, pushing what happens on stream as it happens. The result
+   * carries the counts and — when the run did not finish normally — why; an error
+   * is reserved for a run that could not start at all.
+   */
+  run: bind<[ComposerRunParams, Channel<ComposerEvent>], ComposerResult>("ComposerService.Run", (params: ComposerRunParams, stream: Channel<ComposerEvent>) => [params, stream]),
+  /**
+   * Stop ends the run id names: the script is interrupted and the request it is
+   * waiting on is cancelled. An id that is already gone is not an error.
+   */
+  stop: bind<[string], void>("ComposerService.Stop", (id: string) => [id]),
 } as const;
 
 /**

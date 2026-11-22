@@ -4,6 +4,7 @@ import { mountAssertionsPanel } from "./components/assertionsPanel";
 import { mountAuthEditor } from "./components/authEditor";
 import { mountBandTrustDialog } from "./components/bandTrust";
 import { mountBodyEditor } from "./components/bodyEditor";
+import { mountComposerPanel } from "./components/composerPanel";
 import { mountConfirmDialog } from "./components/closeConfirm";
 import { mountFirstRunDialog } from "./components/firstRun";
 import { mountGrpcComposer } from "./components/grpcComposer";
@@ -27,6 +28,7 @@ import { IdentityService, RequestService, WorkspaceService, events, type Workspa
 import { isMyGo } from "./runtime";
 import { requireScriptTrust } from "./scriptGate";
 import { mountExamplePicker, type ScriptExampleContext } from "./scriptExamples";
+import { runComposer, stopComposer, stopComposerIfActive } from "./composer";
 import {
   disconnectGrpc,
   getGrpcSession,
@@ -58,6 +60,7 @@ import {
   loadSavedRequest,
   loadWorkspace,
   moveRequest,
+  newComposerDocument,
   newMarkdownDocument,
   newRequest,
   newWorkspace,
@@ -86,6 +89,9 @@ function requestTabs(kind: RequestKind): TabDef[] {
   switch (kind) {
     case "markdown":
       // Markdown 条目没有请求页签：主区整个让给文档编辑器。
+      return [];
+    case "composer":
+      // Composer 编排同样只有一整页（脚本编辑器），页签整条收起。
       return [];
     case "websocket":
       return [
@@ -179,6 +185,7 @@ for (const id of [
   "grpc-metadata",
   "settings",
   "markdown",
+  "composer",
 ]) {
   const view = document.createElement("div");
   view.className = "req-view";
@@ -256,8 +263,9 @@ function resetResponse(): void {
 
 async function send(): Promise<void> {
   if (inFlight !== null) return;
-  // Markdown 条目没有发送语义（顶栏整体隐藏，这里防的是快捷键等旁路入口）。
-  if (getRequest().kind === "markdown") return;
+  // Markdown 文档与 Composer 编排没有发送语义（顶栏的按钮是别的动作，这里防的是
+  // 快捷键等旁路入口）。
+  if (getRequest().kind === "markdown" || getRequest().kind === "composer") return;
   if (getRequest().url.trim() === "") {
     document.querySelector<HTMLInputElement>("#url")?.focus();
     return;
@@ -594,6 +602,9 @@ mountUrlBar(topbar, {
   disconnect: () => disconnectSocket(),
   grpcCall: () => grpcCall(),
   grpcStop: () => disconnectGrpc(),
+  // Composer：右侧按钮在「运行 / 终止」之间切换。
+  composerRun: () => runComposer(),
+  composerStop: () => stopComposer(),
   // 文档的「保存」= 收进左侧工作区（更新条目内容、工作区置脏）；
   // 写成 .band 文件仍归侧栏的保存/另存。
   save: () => upsertEntry(snapshotCurrent()),
@@ -783,6 +794,20 @@ const markdownEditor = mountMarkdownEditor(
   subscribe,
 );
 
+// Composer 编排：整页一个脚本编辑器（kind="composer" 时主区只显示它），
+// 内容绑定到当前条目的 composerScript。顶部 slim 工具行给「插入范例」。
+const composerEditor = mountScriptEditor(
+  viewOf("composer"),
+  () => getRequest().composerScript,
+  (value) => {
+    updateRequest((state) => {
+      state.composerScript = value;
+    });
+  },
+  subscribe,
+);
+mountScriptToolbar(viewOf("composer"), "composer", composerEditor);
+
 let currentKind: RequestKind = getRequest().kind;
 let currentRequest = getRequest();
 let tabsKey = JSON.stringify(requestTabs(currentKind));
@@ -790,19 +815,19 @@ let tabsKey = JSON.stringify(requestTabs(currentKind));
 const requestTabsHandle = createTabs(reqTabsHost, requestTabs(currentKind), firstTab(currentKind), showRequestTab);
 showRequestTab(firstTab(currentKind));
 
-// gRPC 与 WS/TCP/Socket.IO 共用同一块响应区（#socket-res-*）：按 kind 挂对应面板。
-// 换面板时先卸载上一个（它退订并清空 DOM），日志各自留在自己的会话里。
-let responsePanel: "socket" | "grpc" | null = null;
+// gRPC、Composer 与 WS/TCP/Socket.IO 共用同一块响应区（#socket-res-*）：按 kind
+// 挂对应面板。换面板时先卸载上一个（它退订并清空 DOM），日志各自留在自己的会话里。
+let responsePanel: "socket" | "grpc" | "composer" | null = null;
 let disposeResponsePanel: (() => void) | null = null;
 
 function syncResponsePanel(kind: RequestKind): void {
-  const want: "socket" | "grpc" = kind === "grpc" ? "grpc" : "socket";
+  const want: "socket" | "grpc" | "composer" =
+    kind === "grpc" ? "grpc" : kind === "composer" ? "composer" : "socket";
   if (responsePanel === want) return;
   disposeResponsePanel?.();
-  disposeResponsePanel =
-    want === "grpc"
-      ? mountGrpcPanel(socketResTabs, socketResContent)
-      : mountSocketPanel(socketResTabs, socketResContent);
+  if (want === "grpc") disposeResponsePanel = mountGrpcPanel(socketResTabs, socketResContent);
+  else if (want === "composer") disposeResponsePanel = mountComposerPanel(socketResTabs, socketResContent);
+  else disposeResponsePanel = mountSocketPanel(socketResTabs, socketResContent);
   responsePanel = want;
 }
 
@@ -810,7 +835,8 @@ function applyKindLayout(kind: RequestKind): void {
   // Markdown 条目不是请求：请求页签与响应区整块收起，主区只剩全高的
   // Markdown 编辑器；顶栏保留——里面的 URL/发送换成文档名输入框（urlBar 自管）。
   const markdown = kind === "markdown";
-  reqTabsHost.hidden = markdown;
+  // Composer 编排也没有请求页签（单页脚本），但响应区要留着显示实时控制台。
+  reqTabsHost.hidden = markdown || kind === "composer";
   responsePane.hidden = markdown;
 
   const socket = !markdown && kind !== "http";
@@ -834,6 +860,13 @@ function applyKindLayout(kind: RequestKind): void {
   }
   if (reqPanel.style.overflow !== "") reqPanel.style.overflow = "";
 
+  if (kind === "composer") {
+    // 单页脚本编辑器：页签整条收起（`[hidden]` 已把它藏掉），只留 composer 视图。
+    composerEditor.ensure();
+    for (const [key, view] of views) view.hidden = key !== "composer";
+    return;
+  }
+
   const defs = requestTabs(kind);
   const key = JSON.stringify(defs);
   if (key !== tabsKey) {
@@ -856,6 +889,8 @@ function syncEditor(): void {
   if (replaced) {
     stopSocketIfActive();
     stopGrpcIfActive();
+    // 编排跑在后台且结果只写当前条目：换了编辑器就停掉，迟到的事件按运行号丢弃。
+    stopComposerIfActive();
     // 在途的 HTTP/SSE 请求属于上一个编辑器：断开通道联系后它的回调自行丢弃，
     // 停止按钮也只作用于当前编辑器的那次执行。后台执行不再碰工作区（请求在
     // 发送时就入册了），所以晚到的完成既不改界面也不写别的请求/工作区。
@@ -869,6 +904,7 @@ function syncEditor(): void {
   currentKind = request.kind;
   stopSocketIfActive();
   stopGrpcIfActive();
+  stopComposerIfActive();
   applyKindLayout(currentKind);
   // 两套响应区共用一个错误条：换类型后上一类请求的错误不该还挂着。
   if (getResponse().error !== null) updateResponse({ error: null });
@@ -940,10 +976,14 @@ mountWorkspaceSidebar(sidebar, {
   saveAs: () => void saveWorkspace(true),
   newWorkspace: () => guardUnsaved(startNewWorkspace, NEW_WORKSPACE_GUARD),
   newRequest: (kind) => {
-    // Markdown 文档创建即入册（工作区列表里立即可见、可改名）；
+    // Markdown 文档与 Composer 编排创建即入册（工作区列表里立即可见、可改名）；
     // 请求保持原语义：执行后才收进内存工作区。
     if (kind === "markdown") {
       newMarkdownDocument();
+      return;
+    }
+    if (kind === "composer") {
+      newComposerDocument();
       return;
     }
     newRequest(kind);
@@ -964,8 +1004,8 @@ mountWorkspaceSidebar(sidebar, {
 // 组件自己订阅，主文件只负责页签文案——它在这里生成并下发给 createTabs）。
 onLangChange(() => {
   applyStatic();
-  // Markdown 条目没有请求页签，页签文案无需重建。
-  if (currentKind === "markdown") return;
+  // Markdown 文档与 Composer 编排没有请求页签，页签文案无需重建。
+  if (requestTabs(currentKind).length === 0) return;
   const defs = requestTabs(currentKind);
   tabsKey = JSON.stringify(defs);
   requestTabsHandle.setTabs(defs);

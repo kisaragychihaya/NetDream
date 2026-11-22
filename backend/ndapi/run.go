@@ -91,6 +91,21 @@ func (run *Run) ExportedVars() map[string]string {
 	return out
 }
 
+// ImportVars replaces the contents of nd.vars with vars. A caller that keeps one
+// variable pool across several runs (a composer run and the entries it calls)
+// hands it back in between, so what the other run wrote is what the script reads
+// next.
+func (run *Run) ImportVars(vars map[string]string) {
+	run.vm.Try(func() {
+		for _, key := range run.vars.Keys() {
+			_ = run.vars.Delete(key)
+		}
+		for k, v := range vars {
+			_ = run.vars.Set(k, v)
+		}
+	})
+}
+
 // RequestObject is nd.request as injected, so the caller can read a pre script's
 // edits back into the request it sent.
 func (run *Run) RequestObject() *goja.Object { return run.request }

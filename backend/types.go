@@ -137,6 +137,46 @@ type SSEMessage struct {
 	Event *SSEEvent `json:"event,omitempty"`
 }
 
+// ComposerRunParams 发起一次自动化运行：goja 脚本经 nd.composer.run 调用工作区条目。
+type ComposerRunParams struct {
+	ID       string            `json:"id"`       // 运行 id（前端生成）；Stop 凭它定位
+	Script   string            `json:"script"`   // composer 脚本（goja）
+	Requests []SavedRequest    `json:"requests"` // 工作区条目快照（前端已剔除 examples 等重字段）
+	Vars     map[string]string `json:"vars"`     // 变量快照：{{var}} 与 nd.vars 数据源
+	Timeout  int               `json:"timeout"`  // 秒；0 = 默认 60（整个运行，含所有被调请求）
+}
+
+// ComposerEvent 是运行过程的一条事件，Run 存续期间经 stream 推送。
+type ComposerEvent struct {
+	Type  string `json:"type"`            // "log" | "test" | "request" | "done"
+	At    int64  `json:"at"`              // Unix 毫秒
+	Level string `json:"level,omitempty"` // log："log"|"warn"|"error"
+	Text  string `json:"text,omitempty"`
+	Name  string `json:"name,omitempty"` // test：断言名
+	Pass  bool   `json:"pass,omitempty"`
+	Error string `json:"error,omitempty"`
+	// request：调用条目标记（Phase "start"|"end"；end 带 Status/TimeMS/Error）
+	Phase   string `json:"phase,omitempty"`
+	Request string `json:"request,omitempty"`
+	Status  int    `json:"status,omitempty"`
+	TimeMS  int64  `json:"timeMS,omitempty"`
+	// done：汇总（Reason：脚本错误/超时/取消的描述；正常完成为空）
+	Tests  int    `json:"tests,omitempty"`
+	Passed int    `json:"passed,omitempty"`
+	Failed int    `json:"failed,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	// Vars 是 done 时变量全量快照（前端无条件下发写回，同 HTTP 语义）；其余事件为 nil。
+	Vars map[string]string `json:"vars,omitempty"`
+}
+
+// ComposerResult 是一次运行的产物：与 done 事件带的是同一组计数与原因。
+type ComposerResult struct {
+	Tests  int    `json:"tests"`
+	Passed int    `json:"passed"`
+	Failed int    `json:"failed"`
+	Reason string `json:"reason"`
+}
+
 // SocketConnectParams 发起一条 WebSocket（ws:// / wss://）、TCP 或 Socket.IO 连接。
 type SocketConnectParams struct {
 	ID       string     `json:"id"`       // 前端生成的连接 id（uuid）；Send/Disconnect 凭它定位连接
@@ -309,6 +349,7 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	PostScript      string             `json:"postScript"`    // 后执行脚本；空 = 无
 	SendScript      string             `json:"sendScript"`    // 发送消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无
 	ReceiveScript   string             `json:"receiveScript"` // 接收消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无
+	ComposerScript  string             `json:"composerScript"` // composer 自动化脚本（goja，nd.composer API）；仅 kind="composer" 使用，空 = 无
 	Assertions      []SavedAssertion   `json:"assertions"`
 	Messages        []SavedMessage     `json:"messages"`        // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol  string             `json:"socketProtocol"`  // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用

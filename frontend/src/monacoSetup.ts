@@ -77,6 +77,103 @@ interface NDMessage {
   event: string;
 }
 
+/**
+ * 一次 nd.composer.run 的结果：和 nd.response 一样有状态码、头、体与 json()，
+ * 另有几项只有 composer 调用才知道的信息。
+ */
+interface NDComposerResult extends NDResponse {
+  /** 响应体是否被截断（超过大小上限）。 */
+  truncated: boolean;
+  /** 该条目是否为 SSE 流且脚本按事件收到了数据。 */
+  sse: boolean;
+  /** 收到的 SSE 事件条数；非 SSE 恒为 0。 */
+  eventCount: number;
+  /** 该条目的后执行脚本报错信息；正常为空串。 */
+  postScriptError: string;
+}
+
+/** nd.composer.run 的第二个参数：本次调用的覆盖项。 */
+interface NDComposerOptions {
+  /** 本条调用的超时秒数；省略或非正数用条目自己的值。 */
+  timeout?: number;
+  /** 本次调用的变量覆盖，浅合并且不写回变量表。 */
+  vars?: Record<string, string>;
+}
+
+/** nd.composer.ws / .tcp / .socketio 打开连接时的选项；不适合的那几项会被忽略。 */
+interface NDComposerSocketOptions {
+  /** 握手查询参数。 */
+  params?: Record<string, string>;
+  /** 握手请求头。 */
+  headers?: Record<string, string>;
+  /** WebSocket 子协议（Sec-WebSocket-Protocol），逗号分隔。 */
+  protocol?: string;
+  /** Socket.IO 的 Engine.IO 握手路径；空 = /socket.io/。 */
+  path?: string;
+  /** Socket.IO 协议版本 "3" 或 "4"（默认）。 */
+  version?: string;
+}
+
+/** 后台连接上收到的一条事件。 */
+interface NDComposerSocketEvent {
+  /** "open" | "message" | "close" | "error"。 */
+  type: string;
+  /** 文本消息为原文，二进制消息为 base64。 */
+  payload: string;
+  isBinary: boolean;
+  /** Socket.IO 的事件名；ws/tcp 为空串。 */
+  event: string;
+  /** Socket.IO 的 ack 回调消息。 */
+  isAck: boolean;
+  /** 关闭码；非 close 事件为 0。 */
+  code: number;
+  /** 关闭原因或错误描述。 */
+  reason: string;
+  /** ws 协商出的子协议。 */
+  protocol: string;
+  /** 事件时间（Unix 毫秒）。 */
+  at: number;
+  /** 握手响应头，按 key/value 列表给。 */
+  headers: { key: string; value: string }[];
+}
+
+/**
+ * 一条后台连接：open 立刻返回句柄（拨号在后台继续），收消息靠脚本主动
+ * receive / poll——goja 没有事件循环，回调模型无处执行。
+ */
+interface NDComposerSocket {
+  /** 连接 id。 */
+  id: string;
+  /** "ws" | "tcp" | "socketio"。 */
+  kind: string;
+  /** 发一条消息；二进制消息传 base64 并置 isBinary。 */
+  send(payload: string, options?: { isBinary?: boolean; event?: string; ack?: boolean }): void;
+  /** 等下一条事件（毫秒；省略 = 一直等到有事件或连接结束）；没有则返回 null。 */
+  receive(timeoutMS?: number): NDComposerSocketEvent | null;
+  /** 立刻取一条已缓冲的事件；没有则返回 null。 */
+  poll(): NDComposerSocketEvent | null;
+  /** 关闭连接；重复调用无副作用。 */
+  close(): void;
+}
+
+/** 一类连接的入口：三种连接用的是同一套句柄 API，只是目标地址不同。 */
+interface NDComposerSocketKind {
+  /** 打开连接：ws 传 ws:// 或 wss://，socketio 传 http(s)://，tcp 传 host:port。 */
+  open(target: string, options?: NDComposerSocketOptions): NDComposerSocket;
+}
+
+/** Composer 自动化编排：调用工作区里的条目、开后台连接；仅 Composer 脚本里可用。 */
+interface NDComposer {
+  /** 调用一个条目并等它跑完；重名或不存在都会抛异常。 */
+  run(nameOrId: string, options?: NDComposerOptions): NDComposerResult;
+  /** 后台打开 WebSocket 连接。 */
+  ws: NDComposerSocketKind;
+  /** 后台打开 TCP 连接。 */
+  tcp: NDComposerSocketKind;
+  /** 后台打开 Socket.IO 连接。 */
+  socketio: NDComposerSocketKind;
+}
+
 /** 摘要输出的编码方式：hex（默认）、标准 base64、URL 安全 base64（无 padding）。 */
 type NDCryptoEncoding = "hex" | "base64" | "base64url";
 
@@ -270,6 +367,8 @@ interface ND {
   message: NDMessage;
   /** 响应信息；仅后执行脚本可用。 */
   response: NDResponse;
+  /** 依次调用工作区里的条目、开关后台连接、共享变量表；仅 Composer 脚本可用。 */
+  composer: NDComposer;
   /** 记录一条测试结果到「断言与校验」的「脚本测试」：fn 抛异常即视为失败。 */
   test(name: string, fn: () => void): void;
   /** 断言：条件不成立时抛异常（在 nd.test 内即记为失败）。 */

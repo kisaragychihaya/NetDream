@@ -14,6 +14,10 @@ backend/
   socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配 + 脚本编排（预连接/发送/接收钩子）
   socket_script.go     # 连接脚本宿主：三钩子执行、连接级登记表、串行运行与变量快照延续、script 事件组装
   socket_script_test.go # 三钩子编排测试（真实 TCP 连接）：改写/失败不发送/只读/变量延续/取消
+  composer.go          # ComposerService 薄壳（Run/Stop）+ 运行引擎（goja + nd.composer.run 调用工作区条目 + 事件流）
+  composer_socket.go   # composer 的非阻塞连接句柄：nd.composer.ws/tcp/socketio 的 open/send/receive/poll/close（pull 模型 + 带锁事件缓冲）
+  composer_test.go     # composer 运行测试（httptest 真实服务）：串行调用/解析/选项/SSE/取消/超时/保留上限
+  composer_socket_test.go # 连接句柄测试（WS/TCP/Socket.IO 回显与静默服务）：非阻塞 open/超时/Stop 唤醒/ack 透传
   grpc.go              # GrpcService 薄壳：List/Connect/Send/CloseSend/Disconnect 转调 protocol + *mygo.Channel[GrpcEvent]→protocol.GrpcSink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
   script_test.go       # 脚本日志/测试结果的保留上限、按 rune 截断、Go 侧 pbkdf2 的可取消性
@@ -40,6 +44,7 @@ frontend/
     state.ts           # 请求/响应/工作区/变量状态 + SSE 事件合帧与保留上限 + localStorage 持久化 + 事件
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
     grpc.ts            # GrpcSession（调用状态/日志/元数据/trailer）+ grpcCall/sendGrpcMessage/closeGrpcSend/disconnectGrpc + 方法表
+    composer.ts        # ComposerSession（运行状态/控制台行/汇总）+ runComposer/stopComposer（事件→日志映射、变量写回、执行隔离）
     scriptGate.ts      # 脚本信任门（HTTP send 与 socket connect 共用）：不可信工作区先弹确认再放行
     scriptExamples.ts  # 脚本范例库：五个钩子（HTTP 预/后执行、连接预连接/发送/接收）的三语范例 + 「插入范例」选择器
     assert.ts          # 断言规则模型 + runAssertions 纯函数
@@ -58,6 +63,7 @@ frontend/
       grpcComposer.ts  # gRPC「消息」页：模板列表 + JSON 编辑 + 发送/结束发送（按流式形态启停）
       grpcSettings.ts  # gRPC「设置」页：传输（明文/TLS/跳过校验/ServerName/超时）+ 描述来源（反射/proto 文件）
       grpcPanel.ts     # gRPC 响应区：实时响应日志（含状态码徽标）+ 元数据/Trailers 两组表格
+      composerPanel.ts # Composer 响应区：实时控制台（日志/断言/请求标记/汇总）+ 清空/复制全部
       assertionsPanel.ts # 断言与校验侧栏
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
       closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
@@ -499,6 +505,47 @@ runtime、5s 超时、页面关闭/断开可取消、日志/测试保留上限�
 - `nd.message` 形状：`{payload, isBinary, event}`（ndapi/message.go；二进制为
   base64 文本，event 仅 Socket.IO 有值）。
 
+### ComposerService（backend/composer.go + backend/composer_socket.go）
+
+Composer 自动化编排：整个条目就是一个 goja 脚本，`nd.composer.run()` 调用工作区里
+的 HTTP 条目（走与「点发送」完全相同的管线：条目自己的预/后脚本、`{{var}}` 展开、
+真实 HTTP/SSE），`nd.composer.ws|tcp|socketio` 以**非阻塞句柄**驱动连接
+（goja 无事件循环 → pull 模型，见下）。契约类型留在 main 包，薄壳只有
+`Run`/`Stop`；运行登记表（map[id]cancel）支撑 Stop。
+
+- `Run(ctx, params ComposerRunParams, stream *mygo.Channel[ComposerEvent]) (ComposerResult, error)`
+  — 发起运行，存续期间不返回；**整体超时 `Timeout`（0=60s）同时管 JS 与在途请求**
+  （composer 脚本合法地要等多个请求，不用普通脚本的 5s）。
+  - `params.Requests` 是前端传的工作区条目快照（已剔除 examples 重字段）——后端不持有
+    工作区，条目解析：`run(nameOrId)` 先按 ID 精确、再按 Name 精确，0 个/重名抛错。
+  - 变量池：`nd.vars` 与被调条目的脚本共用一份（调用前 pull、调用后 push），
+    `options.vars` 是单次浅合并覆盖（该次调用跑在池副本上，不写回）；池访问带锁
+    （`varsMu`，用户明确要求的并发保证，后台连接 goroutine 与未来扩展同理）。
+  - `nd.composer.run(ref, {timeout?, scriptTimeout?, vars?})`：timeout 覆盖该次请求
+    超时；**scriptTimeout 覆盖该次被调条目的预/后脚本超时（默认 5s，HTTP 原路径
+    不变）**；返回 `{status,statusText,headers,body,timeMS,sizeBytes,truncated,sse,
+    eventCount,postScriptError,json()}`；4xx/5xx 正常返回，网络错误与条目预脚本失败
+    抛 JS 异常（可 catch）；SSE 收集事件（body 为 data 的 \n 拼接 + eventCount）。
+  - **非阻塞连接句柄**（composer_socket.go）：`open(target, options?)` 立即返回
+    （后台拨号，dial 失败只是缓冲里一条 error 事件）；三种连接同一套方法
+    `send(payload,{isBinary?,event?,ack?})` / `receive(timeoutMs?)`（阻塞，超时/关闭/
+    运行结束返回 null）/ `poll()`（非阻塞）/ `close()`（幂等），另有只读 `id`/`kind`。
+    底层复用 `protocol.Connect/Send/Disconnect`，事件 Sink 换成带锁缓冲（1024 条
+    上限，满丢最新并 warn 一次；自己 send 的回执不进缓冲）。open/error/close 转成
+    `[ws]`/`[tcp]`/`[socketio]` 前缀的 log 行进事件流（消息不进）。**连接归本次
+    运行所有**：脚本结束先 `closeAll()` 再发 done；Stop/超时会立刻唤醒阻塞的
+    `receive`（缓冲等待 select 运行 ctx）。
+  - **嵌套拉起阻止**：`nd.composer` 只装配在 composer 自己的 VM；普通前后脚本、
+    socket 钩子与被调条目的脚本里 `typeof nd.composer === "undefined"`（装配模型
+    天然隔离，守卫测试锁定）。
+  - 事件时序：`request/start` →（条目脚本 log/test，log 带 `[条目名]` 前缀）→
+    `request/end` → … → `done{Tests,Passed,Failed,Reason,Vars 全量}`；`reportMu` +
+    finished 保证 done 是最后一条（后台连接的迟到行静默丢弃）。日志/测试保留上限
+    与 HTTP 同款（各 1000 条、超限 warn 一条）。Reason：空 / `运行超时：超过 Ns…` /
+    `运行已取消` / 脚本错误原文。脚本错误也经 done 表达，Run 的 error 只留给注册失败。
+- `Stop(id string)` — 取消进行中的运行（ctx 取消：goja Interrupt + 在途请求中止 +
+  阻塞 receive 唤醒）；不存在静默返回。
+
 ### 工作区（.band）
 
 `.band` 有两种容器，按文件头 sniff（前 4 字节）区分：
@@ -687,7 +734,7 @@ type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID         string           `json:"id"`
 	Name       string           `json:"name"`
-	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "grpc" | "markdown"；空 = http（兼容旧 .band）
+	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "grpc" | "composer" | "markdown"；空 = http（兼容旧 .band）
 	Markdown   string           `json:"markdown"` // kind="markdown" 的文档内容；其余 kind 恒为空串
 	Method     string           `json:"method"`
 	URL        string           `json:"url"`
@@ -707,6 +754,7 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	PostScript string           `json:"postScript"` // 后执行脚本；空 = 无（仅 HTTP）
 	SendScript    string        `json:"sendScript"`    // 发送消息脚本（onSend）；仅 WS/TCP/Socket.IO 使用
 	ReceiveScript string        `json:"receiveScript"` // 接收消息脚本（onReceive）；仅 WS/TCP/Socket.IO 使用
+	ComposerScript string       `json:"composerScript"` // composer 自动化脚本（goja，nd.composer API）；仅 kind="composer"
 	Assertions []SavedAssertion `json:"assertions"`
 	Messages   []SavedMessage   `json:"messages"`       // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol string       `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
@@ -828,7 +876,7 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
       <nav id="res-tabs"></nav>
       <div id="res-content"></div>
       <aside id="assert-panel"></aside>    <!-- assertionsPanel.ts -->
-      <!-- Socket 响应区（kind=websocket/socketio/tcp/grpc 时可见；#res-* 隐藏） -->
+      <!-- Socket 响应区（kind=websocket/socketio/tcp/grpc/composer 时可见；#res-* 隐藏） -->
       <nav id="socket-res-tabs"></nav>
       <div id="socket-res-content"></div>
     </section>
@@ -840,14 +888,16 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
 `#res-tabs/#res-content/#assert-panel`、隐藏 `#socket-res-*`；socket 反之；
 **markdown 把 `#req-tabs` 与整个 `#response-pane` 一起收起**（`[hidden]` 在各元素
 的 display 规则里有 `display: none` 覆盖，UA 默认样式压不过），`#req-panel` 里
-只显示 markdown 视图，`overflow` 放开为 `visible`（工具栏气泡向上弹，不能被面板裁剪）。
+只显示 markdown 视图，`overflow` 放开为 `visible`（工具栏气泡向上弹，不能被面板裁剪）；
+**composer 收起 `#req-tabs` 但保留 `#response-pane`**（单页脚本编辑器 + 实时控制台，
+响应区面板由 `syncResponsePanel` 挂 composerPanel）。
 请求页签集同样按 kind 切换（见「行为细节」）。
 
 ### state.ts
 
 - `RequestState`：method/url/params/headers/pathParams/bodyType/formData/urlEncoded/raw/rawType/
   binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP/Socket.IO 追加**：
-  `kind: "http" | "websocket" | "tcp" | "socketio" | "grpc" | "markdown"`（默认 "http"）、`messages: SavedMessage[]`
+  `kind: "http" | "websocket" | "tcp" | "socketio" | "grpc" | "composer" | "markdown"`（默认 "http"）、`messages: SavedMessage[]`
   （已存消息模板，Socket.IO 模板带 `event`）、`socketProtocol: string`（WS 子协议，设置页编辑）、
   `socketEvents: SavedSocketEvent[]`（Socket.IO 事件定义）、`socketIOVersion: string`
   （"4" 默认 / "3"，映射 `SocketConnectParams.version`）、`socketIOPath: string`
@@ -890,17 +940,17 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   示例只随工作区落进 .band。读取仍按旧格式解析——老快照里带着 examples 也认得。
 - 响应与断言结果**不**持久化；脚本产物（日志/测试/错误）同样不持久化；
   Socket 会话（日志/连接状态）也不持久化。
-- `newRequest(kind)` 按类型重置编辑器；`newMarkdownDocument()` 新建未命名
-  Markdown 文档**并入册**（currentId 指向新条目、置脏——文档没有「发送」动作，
+- `newRequest(kind)` 按类型重置编辑器；`newMarkdownDocument()` / `newComposerDocument()`
+  新建未命名文档/编排**并入册**（currentId 指向新条目、置脏——这类条目没有「发送」动作，
   沿用请求的「执行后才收编」规则会无处可改名）；`snapshotCurrent()` 快照带
-  kind/messages/socketEvents/markdown，命名规则：HTTP `METHOD host/path`；
+  kind/messages/socketEvents/markdown/composerScript，命名规则：HTTP `METHOD host/path`；
   WS `WS host/path`；Socket.IO `SIO host/path`；TCP `TCP host:port`；gRPC `GRPC host:port`
   （截断 40 字符；tcp/grpc 的地址不过 URL 解析，否则 host:port 被当成 scheme）；
-  **markdown 返回空串**（无 URL 可推导，界面按当前语言给「未命名文档」，
+  **markdown/composer 返回空串**（无 URL 可推导，界面按当前语言给「未命名文档/编排」，
   与工作区空名的显示约定一致）。
-- `renameCurrentMarkdown(name)`：给当前文档改名；currentId 为 null 时（重启后
-  会话恢复、内存工作区为空）先 `upsertEntry(snapshotCurrent())` 收编成新条目再改，
-  名字不静默丢失。
+- `renameCurrentDocument(name)`（原 renameCurrentMarkdown，markdown/composer 通用）：
+  给当前文档/编排改名；currentId 为 null 时（重启后会话恢复、内存工作区为空）先
+  `upsertEntry(snapshotCurrent())` 收编成新条目再改，名字不静默丢失。
 
 ### socket.ts
 
@@ -956,6 +1006,26 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   流式徽章；点击写回 `grpcMethod`（存 `"service/name"`，比对时归一为点号兼容
   fullName），`raw` 为空才自动填 `inputTemplate`；换条目后迟到的结果按编辑器身份丢弃。
   响应区 `grpcPanel.ts` 与 socketPanel 互斥挂载（main.ts `syncResponsePanel`）。
+
+### composer.ts
+
+- `ComposerSession`：`{ runId, status: "idle"|"running"|"done", log, summary, editor,
+  stoppedByUser }`，单例；控制台行上限 500 条；`editor` 记着发起运行的编辑器对象
+  （执行隔离，迟到事件一律丢弃——不写控制台也不写变量表）。
+- `runComposer()`（urlBar 主按钮）：校验脚本非空 → **脚本信任门**（scriptGate.ts 共用，
+  composerScript 计入 `workspaceHasScripts()`）→ params：`requests` = 工作区条目快照
+  （**剔除 markdown 条目与 examples 重字段**）、`vars` 快照、`timeout`（条目 timeout 字段，
+  0 = 后端默认 60s）；`Channel<ComposerEvent>` 调 `ComposerService.run`（不 await）。
+  - 事件 → 控制台行：log（级别着色）、test（✓/✗）、request（▶ 开始 / 结束带状态码与
+    耗时，error 红）、done（汇总 + **vars 无条件 setVars 写回**，HTTP 同款语义）。
+  - `ComposerService.run` 的返回（ComposerResult）只兜底：没收到 done 时用它收尾。
+- `stopComposer()`（终止按钮）：幂等——本地先收尾成 done 并记「已停止」行，再调
+  `ComposerService.stop(runId)`；**保留 runId**，后端取消后补发的 done（带变量快照）
+  仍被收下写回。切换 kind/载入条目先停（main.ts `stopComposerIfActive()`）。
+- 页面结构：单页脚本编辑器（mountScriptEditor 绑定 `composerScript`）+「插入范例」
+  工具行（composer 上下文两条范例）；顶栏 = 名称输入（renameCurrentDocument）+ 超时
+  秒数输入（写 timeout，数字框输入中不被 sync 回写打断）+ 运行/终止按钮随
+  `getComposerSession().status` 切换；创建即入册（`newComposerDocument()`，同 markdown）。
 
 ### assert.ts（纯函数，便于测试）
 
@@ -1166,7 +1236,7 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   或新建工作区都会重置（generation 推进），切换条目也绕不过（逐次发送都校验）。
   这套流程抽在 `scriptGate.ts`（`requireScriptTrust`），HTTP `send()` 与 socket
   `connectSocket()`（三个连接脚本任一非空时）共用；`workspaceHasScripts()` 把
-  发送/接收脚本也算作「工作区带脚本」。
+  发送/接收脚本与 composerScript 也算作「工作区带脚本」。
   文案在 `dialog.scriptTrust*`（三语）。
 - UI（components/workspaceSidebar.ts）：index.html 结构改为
   `<main id="app">` 两列网格——左 `<aside id="workspace-sidebar">`，原全部内容包进
@@ -1174,11 +1244,11 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存 / 新建」
   （两字一组，title 给全名；「新建」= 新建工作区，脏时先过未保存守卫）；
   「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接 / Socket.IO 连接 /
-  gRPC 调用 / Markdown 文件，末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` /
+  gRPC 调用 / Composer 自动化 / Markdown 文件，末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` /
   `newMarkdownDocument()` / `addFolder(null)`）；
   可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
   脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
-  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章、Socket.IO `IO` 徽章、gRPC = 玫红 `RPC` 徽章、
+  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章、Socket.IO `IO` 徽章、gRPC = 玫红 `RPC` 徽章、Composer = 靛蓝 `CMP` 徽章、
   Markdown = 蓝色 `MD` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。

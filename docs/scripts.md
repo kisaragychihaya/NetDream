@@ -86,3 +86,57 @@ if (nd.message.payload.includes("error")) {
   console.error("第", n, "条消息含 error：", nd.message.payload);
 }
 ```
+
+## Composer 自动化编排
+
+Composer 条目（侧栏「＋ 新建请求 → Composer 自动化」）的整个页面就是一个脚本：
+`nd.composer.run()` 同步调用工作区里的 HTTP 条目（含它们的预/后脚本与 `{{var}}` 展开），
+`nd.composer.ws|tcp|socketio` 以非阻塞句柄驱动连接。整个运行的超时在顶栏设置
+（默认 60 秒，覆盖脚本与所有被调请求）；被调条目自己的预/后脚本默认仍限 5 秒，
+可用 `scriptTimeout` 选项按次调整。
+
+```js
+nd.composer.run("取首页");                          // 按名字；重名会抛错，改用 id
+const res = nd.composer.run("登录", {
+  timeout: 10,          // 该次请求超时（秒）
+  scriptTimeout: 10,    // 该次被调条目的预/后脚本超时（秒，默认 5）
+  vars: { who: "一次" }, // 单次覆盖，不写回变量池
+});
+// res = { status, statusText, headers, body, timeMS, sizeBytes, truncated,
+//         sse, eventCount, postScriptError, json() }
+```
+
+串行调用 + 断言 + 变量接力：
+
+```js
+const login = nd.composer.run("登录");
+nd.test("登录成功", () => nd.assert(login.status === 200, "status=" + login.status));
+nd.vars.set("token", login.json().token);
+const me = nd.composer.run("当前用户");
+nd.test("带 token 能访问", () => nd.assert(me.status === 200));
+```
+
+后台连接（pull 模型：open/send 不阻塞，事件经 receive/poll 主动拉取）：
+
+```js
+const ws = nd.composer.ws.open("ws://localhost:8124", {
+  headers: { "x-token": nd.vars.get("token") || "" },
+});
+// open 立即返回，连接在后台建立；脚本继续干别的
+const login = nd.composer.run("登录");
+ws.send(JSON.stringify({ token: login.json().token }));
+
+const evt = ws.receive(5000);   // 最多等 5 秒；超时/关闭/终止返回 null
+nd.test("收到回显", () => nd.assert(evt !== null && evt.type === "message"));
+ws.poll();                      // 非阻塞取一条，没有就 null
+ws.close();
+// 事件 = { type:"open"|"message"|"error"|"close", payload, isBinary,
+//          event, isAck, code, reason, protocol, at, headers: [{key,value}] }
+```
+
+句柄三种 kind 方法一致：`send(payload, {isBinary?, event?, ack?})`（event/ack 仅
+Socket.IO）、`receive(timeoutMs?)`、`poll()`、`close()`；另有只读 `id`/`kind`。
+连接归本次运行所有：脚本结束或点「终止」时全部自动关闭，阻塞中的 `receive` 会
+立刻返回 `null`。连接的 open/error/close 会作为日志行出现在控制台（消息事件不进）。
+普通前后脚本与 socket 钩子里没有 `nd.composer`（`typeof nd.composer === "undefined"`），
+嵌套拉起会被天然阻止。

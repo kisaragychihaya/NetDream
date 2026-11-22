@@ -54,6 +54,7 @@ const NEW_OPTIONS: { kind: RequestKind; labelKey: string }[] = [
   { kind: "socketio", labelKey: "sidebar.newSocketIO" },
   { kind: "tcp", labelKey: "sidebar.newTcp" },
   { kind: "grpc", labelKey: "sidebar.newGrpc" },
+  { kind: "composer", labelKey: "sidebar.newComposer" },
   { kind: "markdown", labelKey: "sidebar.newMarkdown" },
 ];
 
@@ -63,6 +64,7 @@ const SOCKET_BADGES: Record<string, { className: string; text: string }> = {
   socketio: { className: "m-badge m-sio", text: "IO" },
   tcp: { className: "m-badge m-tcp", text: "TCP" },
   grpc: { className: "m-badge m-rpc", text: "RPC" },
+  composer: { className: "m-badge m-cmp", text: "CMP" },
   markdown: { className: "m-badge m-md", text: "MD" },
 };
 
@@ -73,9 +75,11 @@ function methodClass(method: string): string {
 
 function displayOf(entry: SavedRequest): string {
   if (entry.name.trim() !== "") return entry.name;
-  // 空名按当前语言回显：请求「未命名请求」，Markdown 文档「未命名文档」
+  // 空名按当前语言回显：请求「未命名请求」，文档类条目按 kind 给默认名
   // （数据里存空串，与工作区名的约定一致，换语言不会把旧译名写成用户数据）。
-  return entry.kind === "markdown" ? t("sidebar.untitledMarkdown") : t(UNTITLED_REQUEST);
+  if (entry.kind === "markdown") return t("sidebar.untitledMarkdown");
+  if (entry.kind === "composer") return t("sidebar.untitledComposer");
+  return t(UNTITLED_REQUEST);
 }
 
 function displayFolder(folder: SavedFolder): string {
