@@ -12,6 +12,7 @@ backend/
   types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedSocketEvent、SavedRequest、SavedFolder、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send（脚本编排）、PickFile（仅有的两个导出方法）+ APIRequest↔protocol.HTTPRequest / APIResponse↔protocol.HTTPResponse 的机械映射
   socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配
+  grpc.go              # GrpcService 薄壳：List/Connect/Send/CloseSend/Disconnect 转调 protocol + *mygo.Channel[GrpcEvent]→protocol.GrpcSink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
   script_test.go       # 脚本日志/测试结果的保留上限、按 rune 截断、Go 侧 pbkdf2 的可取消性
   ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
@@ -25,6 +26,8 @@ backend/
     socket.go          # 连接注册表 + WS/TCP 读写循环 + Connect/Send/Disconnect
     socket_test.go     # Connect 的取消语义：WS/TCP 读中取消、握手中取消、Disconnect 结束读循环
     socketio.go        # Socket.IO（Socket.IO v5/EIO4 与 v2/EIO3）：握手、心跳、EVENT/ACK/CONNECT_ERROR、二进制占位
+    grpc.go            # gRPC：描述源（服务器反射 / 本地 .proto）、注册表管理的四种流式调用（grpcurl 动态调用）、事件推送
+    grpc_test.go       # 反射/proto 两种描述源、四种流式形态、非 OK 状态、Disconnect 取消的集成测试（interop 测试服务器）
     proxy*.go          # 系统代理（Windows 注册表 / macOS scutil / 其他平台直连），build tag 跟文件走
 frontend/
   index.html           # 静态骨架（id 见下）
@@ -34,6 +37,7 @@ frontend/
     monacoContributions.ts # Monaco 保留的 contribution 清单（副作用导入，见「脚本编辑器」）
     state.ts           # 请求/响应/工作区/变量状态 + SSE 事件合帧与保留上限 + localStorage 持久化 + 事件
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
+    grpc.ts            # GrpcSession（调用状态/日志/元数据/trailer）+ grpcCall/sendGrpcMessage/closeGrpcSend/disconnectGrpc + 方法表
     assert.ts          # 断言规则模型 + runAssertions 纯函数
     components/
       urlBar.ts        # 方法下拉 + URL + 发送按钮（kind 感知：Socket 显示 连接/断开）
@@ -46,6 +50,10 @@ frontend/
       socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉（Socket.IO 另有事件名/Ack）+ 设置页（按 kind）
       socketEventsEditor.ts # Socket.IO「事件」页：事件名 + 监听开关 + 描述
       socketPanel.ts   # Socket 响应区：实时响应日志（发送/接收）+ 握手响应头
+      grpcMethods.ts   # gRPC「方法」页：获取方法（GrpcService.list）+ 按服务分组的方法列表（四色流式徽章）
+      grpcComposer.ts  # gRPC「消息」页：模板列表 + JSON 编辑 + 发送/结束发送（按流式形态启停）
+      grpcSettings.ts  # gRPC「设置」页：传输（明文/TLS/跳过校验/ServerName/超时）+ 描述来源（反射/proto 文件）
+      grpcPanel.ts     # gRPC 响应区：实时响应日志（含状态码徽标）+ 元数据/Trailers 两组表格
       assertionsPanel.ts # 断言与校验侧栏
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
       closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
@@ -56,6 +64,7 @@ scripts/
   sse-demo.ts          # 本地 SSE 测试服务器（http://localhost:8123/sse）
   socket-demo.ts       # 本地 WS/TCP 回显测试服务器（ws://localhost:8124，tcp://localhost:8125）
   socketio-demo.ts     # 本地 Socket.IO 演示服务器（http://localhost:6021/，命名空间 /admin）
+  grpc-demo/           # 本地 gRPC 演示服务器（明文 127.0.0.1:50051，interop 测试服务 + 服务器反射；go run ./scripts/grpc-demo）
 resources/
   icon.png             # 应用图标（正方形 PNG）：mygo.config.ts 的 icon 指向它，
                        # 用于窗口标题栏/任务栏/打包产物；frontend/public/icon.png 是同一份拷贝（favicon 与设置页「关于」logo）
@@ -63,7 +72,7 @@ resources/
 
 ## IPC 契约（backend/types.go + backend/service.go + backend/socket.go + backend/workspace.go，唯一事实来源）
 
-`mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{})` 绑定。注意：**结构体的所有导出方法都会被绑定**，
+`mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, GrpcService{}, AppService{}, IdentityService{})` 绑定。注意：**结构体的所有导出方法都会被绑定**，
 各 Service 上只允许出现契约列出的导出方法（helper 必须小写或未导出）。
 方法在自己的 goroutine 运行；第一个参数可为 `context.Context`（页面关闭自动取消）。
 方法返回可以是 `error`、`(T, error)` 或无返回（mygo 反射均支持）。
@@ -409,6 +418,38 @@ Version="3" 时的 Socket.IO v2 / Engine.IO v3）；**不实现 long-polling，�
   「复制全部」的文本同样带 `[事件名 ack base64]`。计数 tooltip 按 kind 区分
   （`socket.wsConnection` / `socket.sioConnection` / `socket.tcpConnection`）。
 
+### GrpcService（backend/grpc.go + backend/protocol/grpc.go）
+
+gRPC 接口调试：一元 / 服务端流式 / 客户端流式 / 双向流式四种形态，方法描述来自
+**服务器反射**（默认）或**本地 .proto 文件**（ProtoFiles 非空时，不依赖服务器开反射）。
+契约类型留在 main 包，`GrpcService` 薄壳转调 `netdream/backend/protocol`，
+`*mygo.Channel[GrpcEvent]` 适配成 `protocol.GrpcSink`。动态调用经
+`github.com/fullstorydev/grpcurl`（描述源 + JSON↔protobuf + InvokeRPC），
+连接 `google.golang.org/grpc`，依赖 `github.com/jhump/protoreflect`。
+所有进行中的调用登记在 protocol 的包级注册表（`map[string]*grpcCall`）。
+
+- `List(ctx, params GrpcListParams) ([]GrpcServiceInfo, error)` — 列服务与方法
+  （含流式标志、输入/输出类型、输入 JSON 模板）。**proto 文件模式不拨号**
+  （本地解析即可，目标不可达也能列）；反射模式才连目标，反射请求同样携带
+  Metadata。grpc.reflection.* 自身不进列表。整体限时 Timeout（0=30s）。
+- `Connect(ctx, params GrpcConnectParams, stream *mygo.Channel[GrpcEvent]) error`
+  — 发起调用，存续期间不返回（等同 socket 的 Connect）。注册表条目在拨号前就位，
+  Disconnect 可打断拨号中的调用。
+  - Method 形如 `"pkg.Service/Method"`（点号写法也认）；一元/服务端流式把唯一请求
+    消息放 Payload（空按 `{}`），客户端/双向流式忽略 Payload，经 `Send` 逐条发。
+  - 传输：Plaintext=明文 h2c，否则 TLS（TLSSkipVerify 跳过证书校验，ServerName
+    覆盖 SNI）；代理与 h2c 同一套规则（http(s) 代理 CONNECT 隧道，socks 直连）。
+  - 事件：`open`（响应元数据到达）→ `message`（receive 每条响应一条；send 在消息
+    被接受解析后确认推送）→ `close`（gRPC 状态码名如 `OK`/`NOT_FOUND` + reason +
+    trailers）；传输层失败推 `error`。非 OK 状态只走 close 事件、返回 nil；
+    用户 Disconnect/页面关闭不再推事件（同 socket 语义）。
+  - 一元调用限 Timeout（0=30s），流式不限时。
+- `Send(id, payload string) error` — 客户端/双向流式逐条发送（JSON）；
+  一元/服务端流式报错。「连接中」即可发：客户端流式的响应头往往随最终应答才到，
+  后端从注册起就排队接收。
+- `CloseSend(id string) error` — 半关闭（幂等）；半关闭后再 Send 报错。
+- `Disconnect(id string)` — 取消调用；不存在静默返回。
+
 ### 工作区（.band）
 
 `.band` 有两种容器，按文件头 sniff（前 4 字节）区分：
@@ -597,7 +638,7 @@ type SavedSocketEvent struct { // Socket.IO 的事件定义（发送消息页的
 type SavedRequest struct { // RequestState 的快照 + 展示名
 	ID         string           `json:"id"`
 	Name       string           `json:"name"`
-	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "markdown"；空 = http（兼容旧 .band）
+	Kind       string           `json:"kind"` // "http" | "websocket" | "tcp" | "socketio" | "grpc" | "markdown"；空 = http（兼容旧 .band）
 	Markdown   string           `json:"markdown"` // kind="markdown" 的文档内容；其余 kind 恒为空串
 	Method     string           `json:"method"`
 	URL        string           `json:"url"`
@@ -621,6 +662,13 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	SocketEvents   []SavedSocketEvent `json:"socketEvents"` // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
 	SocketIOVersion string      `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
 	SocketIOPath    string      `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
+	// gRPC 调用配置；仅 kind="grpc" 使用（URL = host:port，headers = 调用元数据，raw = 消息 JSON）。
+	GrpcMethod        string   `json:"grpcMethod"`        // 选中的方法全名 "pkg.Service/Method"
+	GrpcPlaintext     bool     `json:"grpcPlaintext"`     // true = 明文 h2c；false = TLS（旧 .band 缺省按明文）
+	GrpcTLSSkipVerify bool     `json:"grpcTlsSkipVerify"` // 跳过证书校验
+	GrpcServerName    string   `json:"grpcServerName"`    // TLS server name 覆盖
+	GrpcProtoFiles    []string `json:"grpcProtoFiles"`    // 本地 .proto（空 = 服务器反射）；nil 落盘补 []
+	GrpcImportPaths   []string `json:"grpcImportPaths"`   // proto import 路径；nil 落盘补 []
 	Examples        []SavedExample `json:"examples"`    // 响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条；nil 落盘补 []
 }
 
@@ -729,7 +777,7 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
       <nav id="res-tabs"></nav>
       <div id="res-content"></div>
       <aside id="assert-panel"></aside>    <!-- assertionsPanel.ts -->
-      <!-- Socket 响应区（kind=websocket/socketio/tcp 时可见；#res-* 隐藏） -->
+      <!-- Socket 响应区（kind=websocket/socketio/tcp/grpc 时可见；#res-* 隐藏） -->
       <nav id="socket-res-tabs"></nav>
       <div id="socket-res-content"></div>
     </section>
@@ -748,13 +796,15 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
 
 - `RequestState`：method/url/params/headers/pathParams/bodyType/formData/urlEncoded/raw/rawType/
   binaryPath/auth/cookies/timeout/http2/preScript/postScript + assertion 规则数组；**WS/TCP/Socket.IO 追加**：
-  `kind: "http" | "websocket" | "tcp" | "socketio" | "markdown"`（默认 "http"）、`messages: SavedMessage[]`
+  `kind: "http" | "websocket" | "tcp" | "socketio" | "grpc" | "markdown"`（默认 "http"）、`messages: SavedMessage[]`
   （已存消息模板，Socket.IO 模板带 `event`）、`socketProtocol: string`（WS 子协议，设置页编辑）、
   `socketEvents: SavedSocketEvent[]`（Socket.IO 事件定义）、`socketIOVersion: string`
   （"4" 默认 / "3"，映射 `SocketConnectParams.version`）、`socketIOPath: string`
   （Engine.IO 握手路径，映射 `SocketConnectParams.path`）、`markdown: string`
-  （kind="markdown" 的文档内容，其余 kind 恒为空串）。messages/socketEvents 与三个字符串字段
-  随 .band 持久化并原样回读。
+  （kind="markdown" 的文档内容，其余 kind 恒为空串）。**gRPC 追加**：`grpcMethod`
+  （选中的方法 "pkg.Service/Method"）、`grpcPlaintext`（默认 true）、`grpcTlsSkipVerify`、
+  `grpcServerName`、`grpcProtoFiles`/`grpcImportPaths`（本地描述来源；非空即 proto 模式）。
+  messages/socketEvents 与这些字段随 .band 持久化并原样回读。
 - 变量 store（应用级，随工作区文件保存）：`getVars/setVars/updateVars/subscribeVars`，
   **纯内存、不写 localStorage**（关闭即清空，避免凭据外泄）；`loadWorkspace` 用
   `file.data.vars` 整体替换（走不置脏的 replaceVars 安静路径），保存时
@@ -791,7 +841,8 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   Markdown 文档**并入册**（currentId 指向新条目、置脏——文档没有「发送」动作，
   沿用请求的「执行后才收编」规则会无处可改名）；`snapshotCurrent()` 快照带
   kind/messages/socketEvents/markdown，命名规则：HTTP `METHOD host/path`；
-  WS `WS host/path`；Socket.IO `SIO host/path`；TCP `TCP host:port`（截断 40 字符）；
+  WS `WS host/path`；Socket.IO `SIO host/path`；TCP `TCP host:port`；gRPC `GRPC host:port`
+  （截断 40 字符；tcp/grpc 的地址不过 URL 解析，否则 host:port 被当成 scheme）；
   **markdown 返回空串**（无 URL 可推导，界面按当前语言给「未命名文档」，
   与工作区空名的显示约定一致）。
 - `renameCurrentMarkdown(name)`：给当前文档改名；currentId 为 null 时（重启后
@@ -820,6 +871,31 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
 - `disconnectSocket()`：置 stoppedByUser → `SocketService.disconnect(connId)`。
 - **切换编辑器 kind 或载入其他工作区条目时，若连接开着先断开**（自动，不询问）。
 
+### grpc.ts
+
+- `GrpcSession`：`{ connId, status: "idle"|"connecting"|"open"|"closed", log,
+  metadata, trailers, target, editor, stoppedByUser, halfClosed }`，单例（同 socket）；
+  日志上限 500 条；`editor` 记着发起调用的编辑器对象，迟到的会话通知凭它丢弃
+  （执行隔离，与 main.ts 的入册守卫同一把尺）。
+- `grpcCall()`（urlBar 主按钮）：校验目标（`host:port`，host 非空、端口 1–65535）与
+  方法（`grpcMethod` 必选），一元/服务端流式把消息页内容（`raw`）作为
+  `GrpcConnectParams.payload`，非法 JSON 本地拦下；`connId` 经 `Channel<GrpcEvent>`
+  调 `GrpcService.connect(params, channel)`。
+  - `open` → status=open、记响应元数据；`message` → 追加日志（send 行由后端确认推送）；
+    `error` → 红色系统行 + 错误条并置 closed；`close` → 系统行带状态码徽标
+    （`OK` 绿、其余红）+ reason + trailers；channel onclose 兜住无事件收尾。
+  - 自动入册在 main.ts：`open` 收一次、`closed` 刷新一次（同 socket 规则），
+    归属凭 `session.editor !== getRequest()` 丢弃。
+- `sendGrpcMessage(payload)` / `closeGrpcSend()`（客户端/双向流式）：**「连接中」即可
+  调用**——客户端流式的响应头常随最终应答才到，后端从注册起就在排队接收；
+  半关闭后禁发（`halfClosed`）。
+- `disconnectGrpc()`：置 stoppedByUser → `GrpcService.disconnect(connId)`（幂等）；
+  切换 kind / 载入条目先断开（main.ts `stopGrpcIfActive()`，与 socket 同点接入）。
+- 方法表（「方法」页 `grpcMethods.ts`）：`GrpcService.list` 拉取，按服务分组 + 四色
+  流式徽章；点击写回 `grpcMethod`（存 `"service/name"`，比对时归一为点号兼容
+  fullName），`raw` 为空才自动填 `inputTemplate`；换条目后迟到的结果按编辑器身份丢弃。
+  响应区 `grpcPanel.ts` 与 socketPanel 互斥挂载（main.ts `syncResponsePanel`）。
+
 ### assert.ts（纯函数，便于测试）
 
 ```ts
@@ -845,7 +921,10 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib）；
     WS = 发送消息 / 请求头 / 请求参数 / 设置（设置 = 子协议输入框，映射 `socketProtocol`）；
     **Socket.IO = 发送消息 / 事件 / 请求头 / 请求参数 / 设置**（设置 = 客户端版本 +
-    握手路径，映射 `socketIOVersion` / `socketIOPath`）；TCP = 发送消息。同样用 tabs.ts。
+    握手路径，映射 `socketIOVersion` / `socketIOPath`）；**gRPC = 方法 / 消息 /
+    Metadata / 设置**（方法 = 获取与选择（`grpcMethod`），消息 = JSON 模板编辑
+    （`raw`）+ 流式发送，Metadata = 调用元数据（`headers`），设置 = 传输与描述来源）；
+    TCP = 发送消息。同样用 tabs.ts。
     - **编辑器按需加载**：Monaco 与 Vditor 都是首次切到对应页/条目时才 `import()`。
       `monacoSetup.ts` 导出 `loadMonaco(): Promise<MonacoApi>`，`scriptEditor.ts` 的
       `ensure()` 第一次被调用才建实例；`markdownEditor.ts` 同样（Vditor 与它的 CSS
@@ -1024,11 +1103,12 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   侧栏内容：工作区名（双击行内重命名，title 显示文件路径）；按钮行「打开 / 保存 / 另存 / 新建」
   （两字一组，title 给全名；「新建」= 新建工作区，脏时先过未保存守卫）；
   「＋ 新建请求」为下拉菜单（HTTP 请求 / WebSocket 连接 / TCP 连接 / Socket.IO 连接 /
-  Markdown 文件，末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` /
+  gRPC 调用 / Markdown 文件，末行分隔线后是「新建文件夹」，选中调 `newRequest(kind)` /
   `newMarkdownDocument()` / `addFolder(null)`）；
   可折叠「变量」区（kvTable 编辑全局 vars，无启用/描述列；
   脚本 setVars 写回时表格随订阅重建）；请求列表（徽章按 kind：HTTP = 方法徽章按方法着色（现状）、
-  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章、Markdown = 蓝色 `MD` 徽章 + 名称 + 行尾 × 删除，
+  WS = 绿色 `WS` 徽章、TCP = 紫色 `TCP` 徽章、Socket.IO `IO` 徽章、gRPC = 玫红 `RPC` 徽章、
+  Markdown = 蓝色 `MD` 徽章 + 名称 + 行尾 × 删除，
   × 需 window.confirm 确认；双击名称行内重命名）；点击行加载；当前条目高亮；
   空工作区显示引导文案。
 - 请求树（同一组件）：列表是树——文件夹行（折叠箭头 + 名称 + hover 时的

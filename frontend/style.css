@@ -2940,3 +2940,291 @@ button:disabled {
   font-size: 11.5px;
   line-height: 1.6;
 }
+
+/* ---- gRPC ---- */
+
+/* 侧栏徽标：与 WS 绿 / TCP 紫 / SIO 橙 / MD 蓝区分开的玫红 */
+.m-rpc {
+  color: #db2777;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] .m-rpc {
+    color: #f472b6;
+  }
+
+  :root[data-theme="auto"] .grpc-stream-bidi {
+    background: color-mix(in srgb, #c084fc 18%, transparent);
+    color: #c084fc;
+  }
+}
+
+:root[data-theme="dark"] .m-rpc {
+  color: #f472b6;
+}
+
+:root[data-theme="dark"] .grpc-stream-bidi {
+  background: color-mix(in srgb, #c084fc 18%, transparent);
+  color: #c084fc;
+}
+
+/* gRPC 也走 Socket 响应区（两组响应区共用一个网格） */
+#response-pane[data-kind="grpc"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 「方法」页 */
+.grpc-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.grpc-methods-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.grpc-fetch {
+  flex: none;
+  min-width: 96px;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.grpc-methods-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grpc-method-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 160px;
+  max-height: 100%;
+  overflow: auto;
+}
+
+.grpc-service {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.grpc-service-name {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.grpc-method-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.grpc-method-row:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.grpc-method-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.grpc-method-name {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.grpc-method-types {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.grpc-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 流式徽标：一元 / 服务端 / 客户端 / 双向 四色 */
+.grpc-stream {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.grpc-stream-unary {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.grpc-stream-server {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.grpc-stream-client {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.grpc-stream-bidi {
+  background: color-mix(in srgb, #7c3aed 16%, transparent);
+  color: #7c3aed;
+}
+
+/* 设置页 */
+.grpc-setting-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.grpc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 明文传输时 TLS 的两项不可用：灰掉但值留着 */
+.grpc-check.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.grpc-server-name {
+  width: 100%;
+}
+
+.grpc-timeout {
+  width: 120px;
+}
+
+.grpc-path-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.grpc-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.grpc-path-value {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 26px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grpc-path-value.empty {
+  color: var(--muted);
+  font-family: var(--font);
+}
+
+.grpc-path-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.grpc-path-add {
+  flex: none;
+  align-self: flex-start;
+  color: var(--accent);
+}
+
+.grpc-error {
+  color: var(--red);
+}
+
+/* 响应区：结束行的状态码徽标（OK 绿、非 OK 红）与 trailers 片段 */
+.sock-code {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.sock-code[data-ok="true"] {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.sock-trailer {
+  flex: none;
+  max-width: 220px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 响应头页里的分组标题（元数据 / Trailers） */
+.res-group-title {
+  padding: 10px 12px 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}

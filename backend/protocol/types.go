@@ -154,3 +154,59 @@ type SocketEvent struct {
 type Sink interface {
 	Send(SocketEvent) error
 }
+
+// GrpcListParams asks what a target serves. Descriptors come from server
+// reflection, or from local .proto files when ProtoFiles is non-empty.
+type GrpcListParams struct {
+	Target        string     // host:port
+	Plaintext     bool       // true = 明文 h2c；false = TLS
+	TLSSkipVerify bool       // 跳过证书校验
+	ServerName    string     // TLS server name 覆盖
+	Metadata      []KeyValue // 调用元数据（反射请求同样携带）
+	ProtoFiles    []string   // 本地 .proto 绝对路径；空 = 服务器反射
+	ImportPaths   []string   // proto 解析的 import 路径（各 proto 文件目录自动加入）
+	Timeout       int        // 秒；0 = 默认 30s（List 与一元调用生效，流式不限时）
+}
+
+// GrpcConnectParams opens one call.
+type GrpcConnectParams struct {
+	GrpcListParams
+	ID      string
+	Method  string // "pkg.Service/Method"（也接受 "pkg.Service.Method"）
+	Payload string // 一元/服务端流式的唯一请求消息（JSON）；客户端/双向流式忽略，经 GrpcSend 逐条发
+}
+
+// GrpcMethodInfo is one callable method of a service.
+type GrpcMethodInfo struct {
+	Service         string
+	Name            string
+	FullName        string // "pkg.Service.Method"
+	ClientStreaming bool
+	ServerStreaming bool
+	InputType       string // 全限定名
+	OutputType      string
+	InputTemplate   string // 输入消息的 JSON 模板（默认值填充）
+}
+
+// GrpcServiceInfo is one service the target serves.
+type GrpcServiceInfo struct {
+	Name    string // fully-qualified
+	Methods []GrpcMethodInfo
+}
+
+// GrpcEvent is one call lifecycle event.
+type GrpcEvent struct {
+	Type      string     // "open" | "message" | "error" | "close"
+	Direction string     // message 专属："send" | "receive"
+	Payload   string     // message 的 JSON
+	At        int64      // Unix 毫秒
+	Code      string     // close：gRPC 状态码名（"OK" / "NOT_FOUND" ...）
+	Reason    string     // 状态描述/错误原因
+	Headers   []KeyValue // open：响应元数据
+	Trailers  []KeyValue // close：trailer 元数据
+}
+
+// GrpcSink is where a call pushes its events.
+type GrpcSink interface {
+	Send(GrpcEvent) error
+}

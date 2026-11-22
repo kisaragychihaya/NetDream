@@ -19,6 +19,7 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 - **SSE 流式响应**：事件实时列表、随时停止
 - **WebSocket / TCP 调试**：连接 / 断开、握手请求头 / 查询参数 / 子协议、消息模板（Text / JSON / XML / HTML / Binary）、实时收发日志、握手响应头
 - **Socket.IO 调试**：Socket.IO v3 / v4 / v5（EIO4）与 v2（EIO3）、URL 路径即命名空间、握手路径可配、发送带事件名与 Ack、按事件勾选监听（切换免重连）
+- **gRPC 调试**：服务器反射 / 本地 .proto 导入获取方法，一元 / 服务端流式 / 客户端流式 / 双向流式四种形态，JSON 消息编辑（输入模板自动填充）、调用元数据、明文 h2c / TLS（可跳过校验、自定义 ServerName）、状态码与 Trailers 展示
 - **响应视图**：美化（JSON / HTML 语法高亮）、原始报文、HTML 沙箱预览、一键复制；响应示例可把当前响应一键存入请求条目（.band 落盘），方便后续查看对比
 - **断言面板**：状态码、包含 / 不包含、响应耗时
 - **预 / 后执行脚本**：goja 引擎执行——预脚本可改写请求、后脚本可断言响应，读写变量，日志进「控制台」页签、断言进断言面板
@@ -63,6 +64,7 @@ bun run typecheck     # 前端类型检查
 bun run sse:demo      # 本地 SSE 测试服务器（http://localhost:8123/sse）
 bun run socket:demo   # 本地 WS/TCP 回显服务器（ws://localhost:8124，tcp://localhost:8125）
 bun run socketio:demo # 本地 Socket.IO 演示服务器（http://localhost:6021/，命名空间 /admin）
+go run ./scripts/grpc-demo # 本地 gRPC 演示服务器（明文 127.0.0.1:50051，interop 测试服务 + 服务器反射）
 ```
 
 ## 构建

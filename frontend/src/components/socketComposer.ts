@@ -1,5 +1,6 @@
 import { onLangChange, t } from "../i18n";
 import type { SavedMessage } from "../mygo";
+import { mountGrpcSettings } from "./grpcSettings";
 import { getSocketSession, sendSocketMessage, subscribeSocket, type SocketStatus } from "../socket";
 import { getRequest, subscribe, updateRequest, type MessageType, type RequestKind } from "../state";
 
@@ -432,7 +433,8 @@ interface TextSlot {
 
 /**
  * 设置页（kind 感知）：WS 是子协议（Sec-WebSocket-Protocol）；Socket.IO 是客户端版本
- * 与握手路径；TCP 没有设置项。kind 一变整块重画——控件值都存在请求态里，重画不丢。
+ * 与握手路径；gRPC 交给 grpcSettings.ts（传输 + 描述来源）；TCP 没有设置项。
+ * kind 一变整块重画——控件值都存在请求态里，重画不丢。
  */
 export function mountSocketSettings(host: HTMLElement): () => void {
   host.textContent = "";
@@ -521,7 +523,8 @@ export function mountSocketSettings(host: HTMLElement): () => void {
     root.textContent = "";
     const kind = getRequest().kind;
     renderedKind = kind;
-    if (kind === "socketio") renderSocketIO();
+    if (kind === "grpc") mountGrpcSettings(root, track);
+    else if (kind === "socketio") renderSocketIO();
     else if (kind === "websocket") renderProtocol();
   };
 

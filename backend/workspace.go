@@ -661,5 +661,11 @@ func filled(req SavedRequest) SavedRequest {
 	if req.Examples == nil {
 		req.Examples = []SavedExample{}
 	}
+	if req.GrpcProtoFiles == nil {
+		req.GrpcProtoFiles = []string{}
+	}
+	if req.GrpcImportPaths == nil {
+		req.GrpcImportPaths = []string{}
+	}
 	return req
 }

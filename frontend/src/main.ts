@@ -6,6 +6,9 @@ import { mountBandTrustDialog } from "./components/bandTrust";
 import { mountBodyEditor } from "./components/bodyEditor";
 import { mountConfirmDialog } from "./components/closeConfirm";
 import { mountFirstRunDialog } from "./components/firstRun";
+import { mountGrpcComposer } from "./components/grpcComposer";
+import { mountGrpcMethods } from "./components/grpcMethods";
+import { mountGrpcPanel } from "./components/grpcPanel";
 import { mountKVTable } from "./components/kvTable";
 import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
@@ -23,6 +26,13 @@ import { applyStatic, onLangChange, t } from "./i18n";
 import type { APIRequest, SavedRequest, SSEMessage, WorkspaceFile, WorkspaceOpen } from "./mygo";
 import { IdentityService, RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import { isMyGo } from "./runtime";
+import {
+  disconnectGrpc,
+  getGrpcSession,
+  grpcCall,
+  stopGrpcIfActive,
+  subscribeGrpc,
+} from "./grpc";
 import {
   connectSocket,
   disconnectSocket,
@@ -93,6 +103,15 @@ function requestTabs(kind: RequestKind): TabDef[] {
         { id: "query", label: t("tabs.wsQuery") },
         { id: "settings", label: t("tabs.settings") },
       ];
+    case "grpc":
+      // 方法与消息各有独立视图（socket 的发送消息页是另一套编辑器），
+      // Metadata 复用键值表格但单独挂一份（行数据仍是 headers）。
+      return [
+        { id: "grpc-methods", label: t("tabs.grpcMethods") },
+        { id: "grpc-messages", label: t("tabs.grpcMessages") },
+        { id: "grpc-metadata", label: t("tabs.grpcMetadata") },
+        { id: "settings", label: t("tabs.settings") },
+      ];
     case "tcp":
       return [{ id: "messages", label: t("tabs.messages") }];
     default:
@@ -142,6 +161,9 @@ for (const id of [
   "post",
   "messages",
   "events",
+  "grpc-methods",
+  "grpc-messages",
+  "grpc-metadata",
   "settings",
   "markdown",
 ]) {
@@ -577,6 +599,8 @@ mountUrlBar(topbar, {
   send: () => void send(),
   connect: () => connectSocket(),
   disconnect: () => disconnectSocket(),
+  grpcCall: () => grpcCall(),
+  grpcStop: () => disconnectGrpc(),
   // 文档的「保存」= 收进左侧工作区（更新条目内容、工作区置脏）；
   // 写成 .band 文件仍归侧栏的保存/另存。
   save: () => upsertEntry(snapshotCurrent()),
@@ -634,6 +658,26 @@ mountAuthEditor(viewOf("auth"));
 mountSocketComposer(viewOf("messages"));
 mountSocketEventsEditor(viewOf("events"));
 mountSocketSettings(viewOf("settings"));
+mountGrpcMethods(viewOf("grpc-methods"));
+mountGrpcComposer(viewOf("grpc-messages"));
+
+// gRPC 的 Metadata 页：与 WS 的请求头同一份数据（意义是调用元数据），单独挂一份
+// 表格只为了给「＋ 添加」换文案。
+mountKVTable(viewOf("grpc-metadata"), {
+  rows: () => getRequest().headers,
+  append: () => {
+    updateRequest((state) => {
+      state.headers = [...state.headers, emptyRow()];
+    });
+  },
+  remove: (index) => {
+    updateRequest((state) => {
+      state.headers = state.headers.filter((_, position) => position !== index);
+    });
+  },
+  addLabel: () => t("grpc.addMetadata"),
+  hint: () => t("grpc.metadataTableHint"),
+});
 
 mountKVTable(viewOf("cookies"), {
   rows: () => getRequest().cookies,
@@ -694,6 +738,22 @@ let tabsKey = JSON.stringify(requestTabs(currentKind));
 const requestTabsHandle = createTabs(reqTabsHost, requestTabs(currentKind), firstTab(currentKind), showRequestTab);
 showRequestTab(firstTab(currentKind));
 
+// gRPC 与 WS/TCP/Socket.IO 共用同一块响应区（#socket-res-*）：按 kind 挂对应面板。
+// 换面板时先卸载上一个（它退订并清空 DOM），日志各自留在自己的会话里。
+let responsePanel: "socket" | "grpc" | null = null;
+let disposeResponsePanel: (() => void) | null = null;
+
+function syncResponsePanel(kind: RequestKind): void {
+  const want: "socket" | "grpc" = kind === "grpc" ? "grpc" : "socket";
+  if (responsePanel === want) return;
+  disposeResponsePanel?.();
+  disposeResponsePanel =
+    want === "grpc"
+      ? mountGrpcPanel(socketResTabs, socketResContent)
+      : mountSocketPanel(socketResTabs, socketResContent);
+  responsePanel = want;
+}
+
 function applyKindLayout(kind: RequestKind): void {
   // Markdown 条目不是请求：请求页签与响应区整块收起，主区只剩全高的
   // Markdown 编辑器；顶栏保留——里面的 URL/发送换成文档名输入框（urlBar 自管）。
@@ -708,6 +768,8 @@ function applyKindLayout(kind: RequestKind): void {
   socketResTabs.hidden = !socket;
   socketResContent.hidden = !socket;
   responsePane.dataset.kind = kind;
+  // 响应区的面板跟着 kind 换（HTTP 下面整块隐藏，不必挂）。
+  if (socket) syncResponsePanel(kind);
 
   if (markdown) {
     // Vditor 工具栏的气泡向上弹出（z-index 很高），会被 #req-panel 的
@@ -741,6 +803,7 @@ function syncEditor(): void {
   currentRequest = request;
   if (replaced) {
     stopSocketIfActive();
+    stopGrpcIfActive();
     // 在途的 HTTP/SSE 请求属于上一个编辑器：断开通道联系后它的回调自行丢弃，
     // 停止按钮也只作用于当前编辑器的那次执行。后台执行不再碰工作区（请求在
     // 发送时就入册了），所以晚到的完成既不改界面也不写别的请求/工作区。
@@ -753,6 +816,7 @@ function syncEditor(): void {
   if (request.kind === currentKind) return;
   currentKind = request.kind;
   stopSocketIfActive();
+  stopGrpcIfActive();
   applyKindLayout(currentKind);
   // 两套响应区共用一个错误条：换类型后上一类请求的错误不该还挂着。
   if (getResponse().error !== null) updateResponse({ error: null });
@@ -762,7 +826,7 @@ subscribe(syncEditor);
 
 mountResponseView(resTabsHost, resContent);
 mountAssertionsPanel(assertPanel);
-mountSocketPanel(socketResTabs, socketResContent);
+// 响应区面板（socket / gRPC）由 applyKindLayout 按 kind 挂载。
 applyKindLayout(currentKind);
 
 // WS/TCP 的自动入册：open 时收一次，断开时再刷新一次；连接被拒等失败也收
@@ -782,6 +846,26 @@ subscribeSocket(() => {
   if (status !== "closed") return;
   const request = getRequest();
   if (request.kind === session.kind && request.url.trim() === session.url) rememberCurrentRequest();
+});
+
+// gRPC 的自动入册同一条规则（open 收一次、closed 再刷新一次），但归属判断用
+// 执行隔离的那把尺：会话记着发起调用时的编辑器对象，换条目/载入工作区之后
+// 迟到的会话通知既不改界面也不写工作区。
+let lastGrpcStatus = getGrpcSession().status;
+
+subscribeGrpc(() => {
+  const session = getGrpcSession();
+  const status = session.status;
+  if (status === lastGrpcStatus) return;
+  lastGrpcStatus = status;
+  if (session.editor !== getRequest()) return;
+  if (status === "open") {
+    rememberCurrentRequest();
+    return;
+  }
+  if (status !== "closed") return;
+  const request = getRequest();
+  if (request.kind === "grpc" && request.url.trim() === session.target) rememberCurrentRequest();
 });
 
 // 拖入 .band 由原生层接管，页面不消费 DOM drop 事件：订阅一次拿绝对路径。

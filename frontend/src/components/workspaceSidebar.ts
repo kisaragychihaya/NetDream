@@ -53,6 +53,7 @@ const NEW_OPTIONS: { kind: RequestKind; labelKey: string }[] = [
   { kind: "websocket", labelKey: "sidebar.newWebSocket" },
   { kind: "socketio", labelKey: "sidebar.newSocketIO" },
   { kind: "tcp", labelKey: "sidebar.newTcp" },
+  { kind: "grpc", labelKey: "sidebar.newGrpc" },
   { kind: "markdown", labelKey: "sidebar.newMarkdown" },
 ];
 
@@ -61,6 +62,7 @@ const SOCKET_BADGES: Record<string, { className: string; text: string }> = {
   websocket: { className: "m-badge m-ws", text: "WS" },
   socketio: { className: "m-badge m-sio", text: "IO" },
   tcp: { className: "m-badge m-tcp", text: "TCP" },
+  grpc: { className: "m-badge m-rpc", text: "RPC" },
   markdown: { className: "m-badge m-md", text: "MD" },
 };
 

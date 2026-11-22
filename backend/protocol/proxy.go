@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -203,6 +204,21 @@ func dialViaProxy(network string, proxy *url.URL, addr string) (net.Conn, error)
 	if err != nil {
 		return nil, err
 	}
+	return proxyTunnel(conn, proxy, addr)
+}
+
+// dialViaProxyContext 与 dialViaProxy 相同，只是连代理这一步也受 ctx 约束：
+// gRPC 的拨号自带期限，不该为代理的 TCP 握手另等一个 30 秒。
+func dialViaProxyContext(ctx context.Context, network string, proxy *url.URL, addr string) (net.Conn, error) {
+	conn, err := (&net.Dialer{Timeout: defaultTimeout}).DialContext(ctx, network, proxy.Host)
+	if err != nil {
+		return nil, err
+	}
+	return proxyTunnel(conn, proxy, addr)
+}
+
+// proxyTunnel 在已连通的代理连接上完成 CONNECT 握手；失败时自己关掉它。
+func proxyTunnel(conn net.Conn, proxy *url.URL, addr string) (net.Conn, error) {
 	// 代理可以接受连接却一直不回 CONNECT 应答：没有期限的话 h2c 的拨号就
 	// 永远停在这里。握手结束后清掉期限，隧道本身由调用方的 ctx 管。
 	_ = conn.SetDeadline(time.Now().Add(defaultTimeout))

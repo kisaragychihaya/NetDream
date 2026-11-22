@@ -170,6 +170,66 @@ type SocketEvent struct {
 	IsAck bool `json:"isAck,omitempty"`
 }
 
+// GrpcListParams 问目标提供哪些服务与方法：方法描述来自服务器反射，
+// ProtoFiles 非空时改读本地 .proto。
+type GrpcListParams struct {
+	Target        string     `json:"target"`        // host:port
+	Plaintext     bool       `json:"plaintext"`     // true = 明文 h2c；false = TLS
+	TLSSkipVerify bool       `json:"tlsSkipVerify"` // 跳过证书校验
+	ServerName    string     `json:"serverName"`    // TLS server name 覆盖
+	Metadata      []KeyValue `json:"metadata"`      // 调用元数据（反射请求同样携带）
+	ProtoFiles    []string   `json:"protoFiles"`    // 本地 .proto 绝对路径；空 = 服务器反射
+	ImportPaths   []string   `json:"importPaths"`   // proto 解析的 import 路径（各 proto 文件目录自动加入）
+	Timeout       int        `json:"timeout"`       // 秒；0 = 默认 30（List 与一元调用生效，流式不限时）
+}
+
+// GrpcConnectParams 发起一次调用。连接参数与 GrpcListParams 同义，逐字段扁平
+// 内联（不嵌入）：mygo 生成 TS 类型不展开嵌入结构体。
+type GrpcConnectParams struct {
+	ID            string     `json:"id"`            // 前端生成的调用 id（uuid）；Send/CloseSend/Disconnect 凭它定位
+	Target        string     `json:"target"`        // host:port
+	Plaintext     bool       `json:"plaintext"`     // true = 明文 h2c；false = TLS
+	TLSSkipVerify bool       `json:"tlsSkipVerify"` // 跳过证书校验
+	ServerName    string     `json:"serverName"`    // TLS server name 覆盖
+	Metadata      []KeyValue `json:"metadata"`      // 调用元数据（反射请求同样携带）
+	ProtoFiles    []string   `json:"protoFiles"`    // 本地 .proto 绝对路径；空 = 服务器反射
+	ImportPaths   []string   `json:"importPaths"`   // proto 解析的 import 路径（各 proto 文件目录自动加入）
+	Timeout       int        `json:"timeout"`       // 秒；0 = 默认 30（List 与一元调用生效，流式不限时）
+	Method        string     `json:"method"`        // "pkg.Service/Method"（也接受点号分隔）
+	// Payload 是一元/服务端流式的唯一请求消息（JSON）；客户端/双向流式忽略，经 Send 逐条发。
+	Payload string `json:"payload"`
+}
+
+// GrpcMethodInfo 是目标的一个可调用方法。
+type GrpcMethodInfo struct {
+	Service         string `json:"service"`         // 所属服务的全限定名
+	Name            string `json:"name"`            // 方法名
+	FullName        string `json:"fullName"`        // "pkg.Service.Method"
+	ClientStreaming bool   `json:"clientStreaming"` // 客户端流式（含双向）
+	ServerStreaming bool   `json:"serverStreaming"` // 服务端流式（含双向）
+	InputType       string `json:"inputType"`       // 请求消息的全限定名
+	OutputType      string `json:"outputType"`      // 响应消息的全限定名
+	InputTemplate   string `json:"inputTemplate"`   // 请求消息的 JSON 模板（默认值填充）
+}
+
+// GrpcServiceInfo 是目标提供的一个服务。
+type GrpcServiceInfo struct {
+	Name    string           `json:"name"` // 服务全限定名
+	Methods []GrpcMethodInfo `json:"methods"`
+}
+
+// GrpcEvent 是调用生命周期事件，Connect 存续期间经 stream 推送。
+type GrpcEvent struct {
+	Type      string     `json:"type"`      // "open" | "message" | "error" | "close"
+	Direction string     `json:"direction"` // message 专属："send" | "receive"
+	Payload   string     `json:"payload"`   // message 的 JSON
+	At        int64      `json:"at"`        // Unix 毫秒
+	Code      string     `json:"code"`      // close：gRPC 状态码名（"OK" / "NOT_FOUND" ...）
+	Reason    string     `json:"reason"`    // 状态描述/错误原因
+	Headers   []KeyValue `json:"headers"`   // open：响应元数据
+	Trailers  []KeyValue `json:"trailers"`  // close：trailer 元数据
+}
+
 type SavedAssertion struct { // 前端 AssertionRule 的持久化形态
 	ID      string `json:"id"`
 	Enabled bool   `json:"enabled"`
@@ -230,6 +290,13 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	SocketEvents    []SavedSocketEvent `json:"socketEvents"`    // Socket.IO 事件定义；nil 落盘补 []（生成 TS 类型要求）
 	SocketIOVersion string             `json:"socketIOVersion"` // Socket.IO 协议版本 "4"（默认）| "3"；仅 Socket.IO 使用
 	SocketIOPath    string             `json:"socketIOPath"`    // Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用
+	// gRPC 调用配置；仅 kind="grpc" 使用，其余 kind 保持零值。
+	GrpcMethod        string   `json:"grpcMethod"`        // 选中的方法全名 "pkg.Service/Method"
+	GrpcPlaintext     bool     `json:"grpcPlaintext"`     // true = 明文 h2c；false = TLS
+	GrpcTLSSkipVerify bool     `json:"grpcTlsSkipVerify"` // 跳过证书校验
+	GrpcServerName    string   `json:"grpcServerName"`    // TLS server name 覆盖
+	GrpcProtoFiles    []string `json:"grpcProtoFiles"`    // nil 落盘补 []（生成 TS 类型要求）；空 = 服务器反射
+	GrpcImportPaths   []string `json:"grpcImportPaths"`   // proto 解析的 import 路径；nil 落盘补 []
 	// Examples 是响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。nil 落盘补 []（生成 TS 类型要求）
 	Examples []SavedExample `json:"examples"`
 }

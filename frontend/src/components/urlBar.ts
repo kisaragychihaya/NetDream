@@ -1,4 +1,5 @@
 import { onLangChange, t } from "../i18n";
+import { getGrpcSession, subscribeGrpc } from "../grpc";
 import { getSocketSession, subscribeSocket } from "../socket";
 import {
   getRequest,
@@ -15,6 +16,10 @@ export interface UrlBarHandlers {
   send: () => void;
   connect: () => void;
   disconnect: () => void;
+  /** gRPC 的「调用」：按当前方法与消息发起一次调用。 */
+  grpcCall: () => void;
+  /** gRPC 的「停止」：断开这次调用。 */
+  grpcStop: () => void;
   /** Markdown 模式下「发送」按钮槽位变成保存工作区。 */
   save: () => void;
 }
@@ -24,6 +29,7 @@ const URL_PLACEHOLDER_KEYS: Record<RequestKind, string> = {
   websocket: "urlbar.websocketPlaceholder",
   tcp: "urlbar.tcpPlaceholder",
   socketio: "urlbar.socketioPlaceholder",
+  grpc: "urlbar.grpcPlaceholder",
   // Markdown 条目隐藏整个顶栏，占位符不会出现，键只为类型完整。
   markdown: "urlbar.markdownPlaceholder",
 };
@@ -141,6 +147,17 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
     if (url.value !== state.url) url.value = state.url;
 
     if (socket) {
+      if (state.kind === "grpc") {
+        // gRPC：连接还在建立或已经建立时按钮是「停止」，其余时候是「调用」。
+        const { status } = getGrpcSession();
+        const live = status === "connecting" || status === "open";
+        send.disabled = false;
+        const label = live ? t("common.stop") : t("urlbar.grpcCall");
+        if (send.textContent !== label) send.textContent = label;
+        send.classList.toggle("disconnect", live);
+        send.title = live ? t("urlbar.grpcStopTitle") : t("urlbar.grpcCallTitle");
+        return;
+      }
       const { status } = getSocketSession();
       const live = status === "connecting" || status === "open";
       send.disabled = false;
@@ -175,6 +192,12 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
     }
     if (!socketKind()) {
       handlers.send();
+      return;
+    }
+    if (getRequest().kind === "grpc") {
+      const { status } = getGrpcSession();
+      if (status === "connecting" || status === "open") handlers.grpcStop();
+      else handlers.grpcCall();
       return;
     }
     const { status } = getSocketSession();
@@ -226,6 +249,7 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
   sync();
   const unsubscribe = subscribe(sync);
   const unsubscribeSocket = subscribeSocket(sync);
+  const unsubscribeGrpc = subscribeGrpc(sync);
   // 语言切换：按钮文案、占位符与提示都按当前语言重算。
   const unsubscribeLang = onLangChange(() => sync());
 
@@ -233,6 +257,7 @@ export function mountUrlBar(host: HTMLElement, handlers: UrlBarHandlers): () => 
     if (flashTimer !== undefined) window.clearTimeout(flashTimer);
     unsubscribe();
     unsubscribeSocket();
+    unsubscribeGrpc();
     unsubscribeLang();
     host.textContent = "";
   };

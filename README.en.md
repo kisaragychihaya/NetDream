@@ -17,6 +17,7 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **SSE streaming**: live event table, stop anytime
 - **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
 - **Socket.IO debugging**: Socket.IO v3 / v4 / v5 (EIO4) and v2 (EIO3), URL path as namespace, configurable handshake path, event name + ack on send, per-event listen filtering (no reconnect needed)
+- **gRPC debugging**: method discovery via server reflection or local .proto import; unary / server-streaming / client-streaming / bidirectional calls; JSON message editing with auto-filled input templates; call metadata; plaintext h2c or TLS (skip-verify, custom ServerName); status codes and trailers display
 - **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy; response examples save the current response into the request entry (persisted in .band) for later comparison
 - **Assertions panel**: status code, contains / not-contains, response time
 - **Pre / post scripts**: executed by a goja engine — pre scripts can rewrite the request, post scripts can assert on the response, both can read/write variables; console output lands in the "Console" tab, assertions in the assertions panel
@@ -63,6 +64,7 @@ bun run typecheck     # frontend type check
 bun run sse:demo      # local SSE test server (http://localhost:8123/sse)
 bun run socket:demo   # local WS/TCP echo servers (ws://localhost:8124, tcp://localhost:8125)
 bun run socketio:demo # local Socket.IO demo server (http://localhost:6021/, namespace /admin)
+go run ./scripts/grpc-demo # local gRPC demo server (plaintext 127.0.0.1:50051, interop test service + reflection)
 ```
 
 ## Build

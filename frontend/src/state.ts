@@ -27,8 +27,8 @@ const SAVE_DELAY_MS = 300;
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type Method = (typeof METHODS)[number];
 
-/** 编辑器类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接、Markdown 文档。 */
-export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio", "markdown"] as const;
+/** 编辑器类型：HTTP 请求、WebSocket 连接、TCP 连接、Socket.IO 连接、gRPC 调用、Markdown 文档。 */
+export const REQUEST_KINDS = ["http", "websocket", "tcp", "socketio", "grpc", "markdown"] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 /** WS/Socket.IO 消息模板的类型（SavedMessage.msgType）。 */
@@ -97,6 +97,18 @@ export interface RequestState {
   socketIOVersion: string;
   /** Socket.IO 的 Engine.IO 握手路径；空 = /socket.io/。 */
   socketIOPath: string;
+  /** gRPC 选中的方法，形如 "pkg.Service/Method"（后端点号写法也认）；空 = 未选。 */
+  grpcMethod: string;
+  /** gRPC 明文传输（不使用 TLS）；默认 true。 */
+  grpcPlaintext: boolean;
+  /** gRPC 跳过 TLS 证书校验（自签证书调试用）。 */
+  grpcTlsSkipVerify: boolean;
+  /** gRPC 的 TLS ServerName（SNI）；空 = 取目标主机名。 */
+  grpcServerName: string;
+  /** gRPC 本地 .proto 文件绝对路径；非空即按本地描述解析，不走服务器反射。 */
+  grpcProtoFiles: string[];
+  /** gRPC proto 的 import 搜索目录。 */
+  grpcImportPaths: string[];
   /** 预执行脚本；空 = 不执行。 */
   preScript: string;
   /** 后执行脚本；空 = 不执行。 */
@@ -179,6 +191,12 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     socketEvents: [],
     socketIOVersion: "",
     socketIOPath: "",
+    grpcMethod: "",
+    grpcPlaintext: true,
+    grpcTlsSkipVerify: false,
+    grpcServerName: "",
+    grpcProtoFiles: [],
+    grpcImportPaths: [],
     preScript: "",
     postScript: "",
     markdown: "",
@@ -577,6 +595,16 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
   return fallback;
 }
 
+/** 字符串列表（proto 文件、import 目录）：非数组给空表，非字符串项丢掉。 */
+function textList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const items: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") items.push(item);
+  }
+  return items;
+}
+
 function hydrateRows(value: unknown, createBlank: () => KVRow): KVRow[] {
   if (!Array.isArray(value)) return [createBlank()];
   const rows: KVRow[] = [];
@@ -706,6 +734,12 @@ function hydrate(source: Record<string, unknown>): RequestState {
     socketEvents: hydrateSocketEvents(source.socketEvents),
     socketIOVersion: text(source.socketIOVersion),
     socketIOPath: text(source.socketIOPath),
+    grpcMethod: text(source.grpcMethod),
+    grpcPlaintext: flag(source.grpcPlaintext, true),
+    grpcTlsSkipVerify: flag(source.grpcTlsSkipVerify, false),
+    grpcServerName: text(source.grpcServerName),
+    grpcProtoFiles: textList(source.grpcProtoFiles),
+    grpcImportPaths: textList(source.grpcImportPaths),
     preScript: text(source.preScript),
     postScript: text(source.postScript),
     markdown: text(source.markdown),
@@ -894,6 +928,13 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     socketEvents: hydrateSocketEvents(saved.socketEvents),
     socketIOVersion: text(saved.socketIOVersion),
     socketIOPath: text(saved.socketIOPath),
+    grpcMethod: text(saved.grpcMethod),
+    // 旧 .band 没有 gRPC 字段：缺省按明文。
+    grpcPlaintext: flag(saved.grpcPlaintext, true),
+    grpcTlsSkipVerify: flag(saved.grpcTlsSkipVerify, false),
+    grpcServerName: text(saved.grpcServerName),
+    grpcProtoFiles: textList(saved.grpcProtoFiles),
+    grpcImportPaths: textList(saved.grpcImportPaths),
     preScript: text(saved.preScript),
     postScript: text(saved.postScript),
     markdown: text(saved.markdown),
@@ -1016,6 +1057,12 @@ export function newMarkdownDocument(): void {
     socketEvents: [],
     socketIOVersion: "",
     socketIOPath: "",
+    grpcMethod: "",
+    grpcPlaintext: true,
+    grpcTlsSkipVerify: false,
+    grpcServerName: "",
+    grpcProtoFiles: [],
+    grpcImportPaths: [],
     preScript: "",
     postScript: "",
     markdown: "",
@@ -1168,26 +1215,31 @@ function newId(): string {
 }
 
 /** 连接类 kind 在自动命名里的前缀；HTTP 没有类型前缀，用方法名。 */
-const KIND_PREFIX: Partial<Record<RequestKind, string>> = { websocket: "WS", socketio: "SIO" };
+const KIND_PREFIX: Partial<Record<RequestKind, string>> = {
+  websocket: "WS",
+  socketio: "SIO",
+  tcp: "TCP",
+  grpc: "GRPC",
+};
 
 function generatedName(kind: RequestKind, method: string, url: string): string {
   // Markdown 文档不参与自动命名：没有 URL 可推导，空名由界面按语言给
   // 「未命名文档」（与工作区空名的显示约定一致）。
   if (kind === "markdown") return "";
   const target = url.trim();
-  let name: string;
-  if (kind === "tcp") {
-    name = `TCP ${target}`.trim();
-  } else {
-    let host = target;
+  // tcp/grpc 的地址就是 host:port，不能过 URL 解析——"api.example.com:50051"
+  // 会被当成 scheme，host 为空，名字里只剩端口。
+  const hostPort = kind === "tcp" || kind === "grpc";
+  let host = target;
+  if (!hostPort) {
     try {
       const parsed = new URL(target);
       host = `${parsed.host}${parsed.pathname}`;
     } catch {
       // A URL without a scheme keeps its raw form.
     }
-    name = `${KIND_PREFIX[kind] ?? method} ${host}`.trim();
   }
+  const name = `${KIND_PREFIX[kind] ?? method} ${host}`.trim();
   return name.length > 40 ? name.slice(0, 40) : name;
 }
 
@@ -1260,6 +1312,12 @@ export function snapshotCurrent(): SavedRequest {
     socketEvents: state.socketEvents.map((event) => ({ ...event })),
     socketIOVersion: state.socketIOVersion,
     socketIOPath: state.socketIOPath,
+    grpcMethod: state.grpcMethod,
+    grpcPlaintext: state.grpcPlaintext,
+    grpcTlsSkipVerify: state.grpcTlsSkipVerify,
+    grpcServerName: state.grpcServerName,
+    grpcProtoFiles: [...state.grpcProtoFiles],
+    grpcImportPaths: [...state.grpcImportPaths],
     preScript: state.preScript,
     postScript: state.postScript,
     markdown: state.markdown,

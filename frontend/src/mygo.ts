@@ -93,6 +93,105 @@ export interface FormField {
   filePath: string;
 }
 
+/**
+ * GrpcConnectParams 发起一次调用。连接参数与 GrpcListParams 同义，逐字段扁平
+ * 内联（不嵌入）：mygo 生成 TS 类型不展开嵌入结构体。
+ */
+export interface GrpcConnectParams {
+  /** 前端生成的调用 id（uuid）；Send/CloseSend/Disconnect 凭它定位 */
+  id: string;
+  /** host:port */
+  target: string;
+  /** true = 明文 h2c；false = TLS */
+  plaintext: boolean;
+  /** 跳过证书校验 */
+  tlsSkipVerify: boolean;
+  /** TLS server name 覆盖 */
+  serverName: string;
+  /** 调用元数据（反射请求同样携带） */
+  metadata: KeyValue[];
+  /** 本地 .proto 绝对路径；空 = 服务器反射 */
+  protoFiles: string[];
+  /** proto 解析的 import 路径（各 proto 文件目录自动加入） */
+  importPaths: string[];
+  /** 秒；0 = 默认 30（List 与一元调用生效，流式不限时） */
+  timeout: number;
+  /** "pkg.Service/Method"（也接受点号分隔） */
+  method: string;
+  /** Payload 是一元/服务端流式的唯一请求消息（JSON）；客户端/双向流式忽略，经 Send 逐条发。 */
+  payload: string;
+}
+
+/** GrpcEvent 是调用生命周期事件，Connect 存续期间经 stream 推送。 */
+export interface GrpcEvent {
+  /** "open" | "message" | "error" | "close" */
+  type: string;
+  /** message 专属："send" | "receive" */
+  direction: string;
+  /** message 的 JSON */
+  payload: string;
+  /** Unix 毫秒 */
+  at: number;
+  /** close：gRPC 状态码名（"OK" / "NOT_FOUND" ...） */
+  code: string;
+  /** 状态描述/错误原因 */
+  reason: string;
+  /** open：响应元数据 */
+  headers: KeyValue[];
+  /** close：trailer 元数据 */
+  trailers: KeyValue[];
+}
+
+/**
+ * GrpcListParams 问目标提供哪些服务与方法：方法描述来自服务器反射，
+ * ProtoFiles 非空时改读本地 .proto。
+ */
+export interface GrpcListParams {
+  /** host:port */
+  target: string;
+  /** true = 明文 h2c；false = TLS */
+  plaintext: boolean;
+  /** 跳过证书校验 */
+  tlsSkipVerify: boolean;
+  /** TLS server name 覆盖 */
+  serverName: string;
+  /** 调用元数据（反射请求同样携带） */
+  metadata: KeyValue[];
+  /** 本地 .proto 绝对路径；空 = 服务器反射 */
+  protoFiles: string[];
+  /** proto 解析的 import 路径（各 proto 文件目录自动加入） */
+  importPaths: string[];
+  /** 秒；0 = 默认 30（List 与一元调用生效，流式不限时） */
+  timeout: number;
+}
+
+/** GrpcMethodInfo 是目标的一个可调用方法。 */
+export interface GrpcMethodInfo {
+  /** 所属服务的全限定名 */
+  service: string;
+  /** 方法名 */
+  name: string;
+  /** "pkg.Service.Method" */
+  fullName: string;
+  /** 客户端流式（含双向） */
+  clientStreaming: boolean;
+  /** 服务端流式（含双向） */
+  serverStreaming: boolean;
+  /** 请求消息的全限定名 */
+  inputType: string;
+  /** 响应消息的全限定名 */
+  outputType: string;
+  /** 请求消息的 JSON 模板（默认值填充） */
+  inputTemplate: string;
+}
+
+/** GrpcServiceInfo 是目标提供的一个服务。 */
+export interface GrpcServiceInfo {
+  /** 服务全限定名 */
+  name: string;
+  methods: GrpcMethodInfo[];
+}
+
 /** IdentityCandidate 是加密保存的收件人候选（只含公钥与展示信息）。 */
 export interface IdentityCandidate {
   id: string;
@@ -245,6 +344,18 @@ export interface SavedRequest {
   socketIOVersion: string;
   /** Engine.IO 握手路径（空 = /socket.io/）；仅 Socket.IO 使用 */
   socketIOPath: string;
+  /** gRPC 调用配置；仅 kind="grpc" 使用，其余 kind 保持零值。 */
+  grpcMethod: string;
+  /** true = 明文 h2c；false = TLS */
+  grpcPlaintext: boolean;
+  /** 跳过证书校验 */
+  grpcTlsSkipVerify: boolean;
+  /** TLS server name 覆盖 */
+  grpcServerName: string;
+  /** nil 落盘补 []（生成 TS 类型要求）；空 = 服务器反射 */
+  grpcProtoFiles: string[];
+  /** proto 解析的 import 路径；nil 落盘补 [] */
+  grpcImportPaths: string[];
   /** Examples 是响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。nil 落盘补 []（生成 TS 类型要求） */
   examples: SavedExample[];
 }
@@ -480,6 +591,34 @@ export const SocketService = {
   disconnect: bind<[string], void>("SocketService.Disconnect", (id: string) => [id]),
   /** Send writes one message to the connection params.ID names. */
   send: bind<[SocketSendParams], void>("SocketService.Send", (params: SocketSendParams) => [params]),
+} as const;
+
+/**
+ * GrpcService lists and calls the gRPC methods of a target. The connections
+ * themselves live in backend/protocol; this shell maps the page's contract types
+ * onto it. Every exported method here is bound to the frontend, so helpers stay
+ * unexported.
+ */
+export const GrpcService = {
+  /**
+   * CloseSend half-closes the request stream of the call id names, so the server
+   * knows no more messages follow; the call keeps receiving until it completes.
+   */
+  closeSend: bind<[string], void>("GrpcService.CloseSend", (id: string) => [id]),
+  /**
+   * Connect opens the call params.ID names and stays until it completes or the
+   * page disconnects it, pushing what happens on stream as it happens.
+   */
+  connect: bind<[GrpcConnectParams, Channel<GrpcEvent>], void>("GrpcService.Connect", (params: GrpcConnectParams, stream: Channel<GrpcEvent>) => [params, stream]),
+  /** Disconnect ends the call id names; an id that is already gone is not an error. */
+  disconnect: bind<[string], void>("GrpcService.Disconnect", (id: string) => [id]),
+  /**
+   * List asks params.Target what it serves: through server reflection, or through
+   * the local .proto files params.ProtoFiles names.
+   */
+  list: bind<[GrpcListParams], GrpcServiceInfo[]>("GrpcService.List", (params: GrpcListParams) => [params]),
+  /** Send writes one request message to the streaming call id names. */
+  send: bind<[string, string], void>("GrpcService.Send", (id: string, payload: string) => [id, payload]),
 } as const;
 
 /**
