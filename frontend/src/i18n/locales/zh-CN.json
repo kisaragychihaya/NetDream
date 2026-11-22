@@ -402,7 +402,10 @@
   "editor": {
     "loadFailed": "编辑器加载失败：{{error}}",
     "loadTimeout": "编辑器加载超时",
-    "retry": "重试"
+    "retry": "重试",
+    "insertExample": "插入范例",
+    "insertExampleTitle": "插入一段可直接运行的脚本范例",
+    "exampleSeparator": "// ---- 范例：{{name}} ----"
   },
   "markdown": {
     "placeholder": "输入 Markdown 内容，工具栏可切换编辑模式…",

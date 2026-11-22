@@ -402,7 +402,10 @@
   "editor": {
     "loadFailed": "エディタの読み込みに失敗しました: {{error}}",
     "loadTimeout": "エディタの読み込みがタイムアウトしました",
-    "retry": "再試行"
+    "retry": "再試行",
+    "insertExample": "サンプルを挿入",
+    "insertExampleTitle": "すぐに実行できるスクリプト例を挿入します",
+    "exampleSeparator": "// ---- サンプル: {{name}} ----"
   },
   "markdown": {
     "placeholder": "Markdown を入力（ツールバーで編集モードを切り替えられます）…",

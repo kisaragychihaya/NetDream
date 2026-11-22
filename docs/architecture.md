@@ -41,6 +41,7 @@ frontend/
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
     grpc.ts            # GrpcSession（调用状态/日志/元数据/trailer）+ grpcCall/sendGrpcMessage/closeGrpcSend/disconnectGrpc + 方法表
     scriptGate.ts      # 脚本信任门（HTTP send 与 socket connect 共用）：不可信工作区先弹确认再放行
+    scriptExamples.ts  # 脚本范例库：五个钩子（HTTP 预/后执行、连接预连接/发送/接收）的三语范例 + 「插入范例」选择器
     assert.ts          # 断言规则模型 + runAssertions 纯函数
     components/
       urlBar.ts        # 方法下拉 + URL + 发送按钮（kind 感知：Socket 显示 连接/断开）
@@ -48,7 +49,7 @@ frontend/
       kvTable.ts       # 通用键值编辑器（启用/键/值/描述/删除/添加）
       bodyEditor.ts    # Body 类型单选 + 五种子编辑器
       authEditor.ts    # 认证（none/basic/bearer）
-      scriptEditor.ts  # Monaco 脚本编辑器（预/后执行脚本页，与 state 双向绑定）
+      scriptEditor.ts  # Monaco 脚本编辑器（预/后执行脚本页，与 state 双向绑定；insertText 供「插入范例」）
       responseView.ts  # 响应区（选项卡 + 美化/原生/预览 + 头/Cookie/实际请求/控制台）
       socketComposer.ts  # Socket「发送消息」页：消息模板列表 + 编辑器 + 类型下拉（Socket.IO 另有事件名/Ack）+ 设置页（按 kind）
       socketEventsEditor.ts # Socket.IO「事件」页：事件名 + 监听开关 + 描述
@@ -979,7 +980,9 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     右侧按钮随会话状态在 连接/断开 间切换（connecting/open 显示 断开）。
   - **请求页签集**：HTTP = 现有 8 页（预执行脚本 / 后执行脚本页挂 Monaco 编辑器，
     见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib，含连接脚本的
-    `nd.message` 视图声明）；
+    `nd.message` 视图声明；**每个脚本页顶部有 slim 工具行，「插入范例」按钩子
+    上下文提供三语范例**——空编辑器整体填入、非空末尾追加并隔 `// ---- 范例：<名> ----`
+    注释线，绝不覆盖已有内容，范例库与契约见 scriptExamples.ts 与 docs/scripts.md）；
     WS = 发送消息 / 请求头 / 请求参数 / 预连接脚本 / 发送脚本 / 接收脚本 / 设置
     （设置 = 子协议输入框，映射 `socketProtocol`；三个脚本页挂 Monaco，分别读写
     `preScript` / `sendScript` / `receiveScript`）；

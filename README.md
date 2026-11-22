@@ -44,7 +44,7 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 - [MyGO](https://github.com/egoist/mygo)：Go 后端 + 系统 webview，绑定用 `mygo.Bind`，前端类型由 `mygo generate` 生成
 - 脚本引擎：[goja](https://github.com/dop251/goja)（纯 Go，无 CGO）
 - 前端：原生 TypeScript（strict；运行时依赖仅脚本编辑器 monaco-editor 与 Markdown 编辑器 Vditor）+ Vite，UI 参照 ApiPost 调试页
-- 契约文档：[`docs/architecture.md`](docs/architecture.md)
+- 契约文档：[`docs/architecture.md`](docs/architecture.md)；脚本范例：[`docs/scripts.md`](docs/scripts.md)
 
 ## 快速开始
 

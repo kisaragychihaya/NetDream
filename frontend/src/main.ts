@@ -26,6 +26,7 @@ import type { APIRequest, SavedRequest, SSEMessage, WorkspaceFile, WorkspaceOpen
 import { IdentityService, RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import { isMyGo } from "./runtime";
 import { requireScriptTrust } from "./scriptGate";
+import { mountExamplePicker, type ScriptExampleContext } from "./scriptExamples";
 import {
   disconnectGrpc,
   getGrpcSession,
@@ -686,6 +687,20 @@ mountKVTable(viewOf("cookies"), {
   addLabel: () => t("cookies.add"),
 });
 
+// 脚本页顶部的 slim 工具行：目前只放「插入范例」。必须在 mountScriptEditor 之后
+// 挂——编辑器挂载会清空宿主；prepend 保证工具行仍在编辑器上方。
+function mountScriptToolbar(
+  view: HTMLElement,
+  context: ScriptExampleContext,
+  editor: { insertText: (text: string, name: string) => void },
+): void {
+  const bar = document.createElement("div");
+  bar.className = "script-toolbar";
+  view.prepend(bar);
+  // 选择器随页面常驻（工具行不会被重建），文档监听与语言订阅跟着页走。
+  mountExamplePicker(bar, context, (code, name) => editor.insertText(code, name));
+}
+
 const preScriptEditor = mountScriptEditor(
   viewOf("pre"),
   () => getRequest().preScript,
@@ -696,6 +711,7 @@ const preScriptEditor = mountScriptEditor(
   },
   subscribe,
 );
+mountScriptToolbar(viewOf("pre"), "http-pre", preScriptEditor);
 
 const postScriptEditor = mountScriptEditor(
   viewOf("post"),
@@ -707,6 +723,7 @@ const postScriptEditor = mountScriptEditor(
   },
   subscribe,
 );
+mountScriptToolbar(viewOf("post"), "http-post", postScriptEditor);
 
 lazyViews.set("pre", preScriptEditor);
 lazyViews.set("post", postScriptEditor);
@@ -724,6 +741,7 @@ const socketPreScriptEditor = mountScriptEditor(
   },
   subscribe,
 );
+mountScriptToolbar(viewOf("pre-script"), "socket-pre", socketPreScriptEditor);
 
 const socketSendScriptEditor = mountScriptEditor(
   viewOf("send-script"),
@@ -735,6 +753,7 @@ const socketSendScriptEditor = mountScriptEditor(
   },
   subscribe,
 );
+mountScriptToolbar(viewOf("send-script"), "socket-send", socketSendScriptEditor);
 
 const socketReceiveScriptEditor = mountScriptEditor(
   viewOf("receive-script"),
@@ -746,6 +765,7 @@ const socketReceiveScriptEditor = mountScriptEditor(
   },
   subscribe,
 );
+mountScriptToolbar(viewOf("receive-script"), "socket-receive", socketReceiveScriptEditor);
 
 lazyViews.set("pre-script", socketPreScriptEditor);
 lazyViews.set("send-script", socketSendScriptEditor);

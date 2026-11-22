@@ -1,5 +1,6 @@
 import { t } from "../i18n";
 import { loadMonaco, monacoTheme, type MonacoApi } from "../monacoSetup";
+import { appendExample } from "../scriptExamples";
 
 /**
  * 挂载一个 Monaco 脚本编辑器，与外部状态双向绑定：
@@ -10,13 +11,16 @@ import { loadMonaco, monacoTheme, type MonacoApi } from "../monacoSetup";
  * Monaco 很重（编辑器本体 + ts 语言服务），所以实例惰性创建：ensure 在「预执行/
  * 后执行」页签第一次显示时调用，之后实例常驻（视图只是 hidden，不销毁重建）。
  * 加载或初始化失败会放开 creating，下次切回来重试，不会永久卡在创建中。
+ *
+ * 返回值里的 insertText 供「插入范例」用：空编辑器整体填入，非空追加，
+ * 实例未创建时直接写外部状态（不为此提前加载 Monaco）。
  */
 export function mountScriptEditor(
   host: HTMLElement,
   get: () => string,
   set: (value: string) => void,
   subscribe: (listener: () => void) => () => void,
-): { ensure: () => void; dispose: () => void } {
+): { ensure: () => void; insertText: (text: string, name: string) => void; dispose: () => void } {
   host.textContent = "";
 
   const box = document.createElement("div");
@@ -122,8 +126,36 @@ export function mountScriptEditor(
 
   const unsubscribe = subscribe(sync);
 
+  /**
+   * 插入一段代码（「插入范例」用）：空编辑器整体填入，非空在末尾追加，
+   * 中间隔一行注释分隔线（带范例名，注释语言跟随界面）。
+   *
+   * 绝不覆盖用户已有内容：这是编辑器里唯一一处「不经过用户输入就改内容」的
+   * 入口，静默覆盖会把写了一半的脚本吃掉。实例还没创建时（用户没切到过该
+   * 页签）直接写外部状态，ensure 时自然带出——Monaco 很重，不为此提前加载。
+   */
+  const insertText = (text: string, name: string): void => {
+    const current = get();
+    const next = appendExample(current, text, name);
+    if (next === current) return;
+    if (instance === null) {
+      set(next);
+      return;
+    }
+    // setValue 会触发 onDidChangeModelContent，由那里写回外部状态。
+    instance.setValue(next);
+    const model = instance.getModel();
+    if (model !== null) {
+      const end = model.getFullModelRange().getEndPosition();
+      instance.setPosition(end);
+      instance.revealPosition(end);
+    }
+    instance.focus();
+  };
+
   return {
     ensure: create,
+    insertText,
     dispose() {
       disposed = true;
       unsubscribe();

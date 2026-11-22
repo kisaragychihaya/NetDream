@@ -402,7 +402,10 @@
   "editor": {
     "loadFailed": "The editor failed to load: {{error}}",
     "loadTimeout": "The editor took too long to load",
-    "retry": "Retry"
+    "retry": "Retry",
+    "insertExample": "Insert example",
+    "insertExampleTitle": "Insert a ready-to-run script example",
+    "exampleSeparator": "// ---- Example: {{name}} ----"
   },
   "markdown": {
     "placeholder": "Enter Markdown content; the toolbar can switch edit modes...",

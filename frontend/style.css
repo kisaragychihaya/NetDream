@@ -3251,3 +3251,65 @@ button:disabled {
 .sock-row.pass .sock-payload {
   color: var(--green);
 }
+
+/* ---- 脚本页工具行（「插入范例」） ---- */
+
+/* 脚本页顶部的一条 slim 工具行：只放按钮，编辑器吃掉剩余高度 */
+.script-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 按钮 + 下拉菜单的定位容器：菜单挂到按钮下方左侧 */
+.script-example {
+  position: relative;
+  flex: none;
+}
+
+.script-example-btn {
+  height: 26px;
+  font-size: 12px;
+}
+
+.script-example-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.script-example-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 10px 26px color-mix(in srgb, #000 16%, transparent);
+}
+
+.script-example-menu[hidden] {
+  display: none;
+}
+
+.script-example-item {
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.script-example-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
