@@ -429,7 +429,7 @@ export function mountSettings(): SettingsDialog {
 
   const logo = document.createElement("img");
   logo.className = "settings-logo";
-  logo.src = "./icon.png";
+  logo.src = "/icon.png";
   logo.alt = "NetDream logo";
 
   const tagline = document.createElement("p");

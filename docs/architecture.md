@@ -58,7 +58,7 @@ scripts/
   socketio-demo.ts     # 本地 Socket.IO 演示服务器（http://localhost:6021/，命名空间 /admin）
 resources/
   icon.png             # 应用图标（正方形 PNG）：mygo.config.ts 的 icon 指向它，
-                       # 用于窗口标题栏/任务栏/打包产物；frontend/icon.png 是同一份拷贝（favicon）
+                       # 用于窗口标题栏/任务栏/打包产物；frontend/public/icon.png 是同一份拷贝（favicon 与设置页「关于」logo）
 ```
 
 ## IPC 契约（backend/types.go + backend/service.go + backend/socket.go + backend/workspace.go，唯一事实来源）
