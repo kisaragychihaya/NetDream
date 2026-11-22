@@ -6,6 +6,7 @@ import {
   logText,
   SOCKET_LOG_LIMIT,
   subscribeSocket,
+  type ScriptPhase,
   type SocketLogEntry,
   type SocketSession,
   type SocketStatus,
@@ -26,6 +27,13 @@ const DIRECTION_TEXT: Record<SocketLogEntry["direction"], string> = {
   send: "socket.dirSend",
   receive: "socket.dirReceive",
   system: "socket.dirSystem",
+};
+
+// 脚本行的阶段徽标：存语言无关的阶段名，显示时按当前语言取文案。
+const PHASE_TEXT: Record<ScriptPhase, string> = {
+  pre: "socket.scriptPhasePre",
+  send: "socket.scriptPhaseSend",
+  receive: "socket.scriptPhaseReceive",
 };
 
 interface LogShell {
@@ -60,6 +68,7 @@ function rowFor(entry: SocketLogEntry): HTMLElement {
   const row = el("div", classes.join(" "));
   row.append(el("span", "sock-time", timeText(entry.at)));
   row.append(el("span", "sock-dir", t(DIRECTION_TEXT[entry.direction])));
+  if (entry.phase !== undefined) row.append(el("span", "sock-script", t(PHASE_TEXT[entry.phase])));
   if (entry.event !== undefined) row.append(el("span", "sock-event", entry.event));
   if (entry.isAck === true) row.append(el("span", "sock-event ack", "ack"));
   if (entry.isBinary) row.append(el("span", "sock-b64", "base64"));
@@ -170,6 +179,7 @@ export function mountSocketPanel(tabsHost: HTMLElement, contentHost: HTMLElement
         .map((entry) => {
           // 复制出来的文本要能脱离界面读：事件名与 ack 标记都带上。
           const tags = [t(DIRECTION_TEXT[entry.direction])];
+          if (entry.phase !== undefined) tags.push(t(PHASE_TEXT[entry.phase]));
           if (entry.event !== undefined) tags.push(entry.event);
           if (entry.isAck === true) tags.push("ack");
           if (entry.isBinary) tags.push("base64");

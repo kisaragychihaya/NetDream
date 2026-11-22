@@ -95,6 +95,9 @@
     "cookies": "Cookie",
     "preScript": "预执行脚本",
     "postScript": "后执行脚本",
+    "preConnectScript": "预连接脚本",
+    "sendScript": "发送脚本",
+    "receiveScript": "接收脚本",
     "messages": "发送消息",
     "events": "事件",
     "wsHeaders": "请求头",
@@ -283,7 +286,11 @@
     "closedByPeer": "连接已被对端关闭",
     "closedWithDetails": "连接已关闭（{{details}}）",
     "notConnected": "连接未建立，先点「连接」",
-    "disconnected": "已断开连接"
+    "disconnected": "已断开连接",
+    "scriptPhasePre": "预连接",
+    "scriptPhaseSend": "发送",
+    "scriptPhaseReceive": "接收",
+    "scriptError": "脚本出错：{{error}}"
   },
   "grpc": {
     "urlNeedsTarget": "请输入主机:端口，如 127.0.0.1:50051",

@@ -68,6 +68,16 @@ type ScriptTest struct {
 	Error string `json:"error"` // failure message; empty when passed
 }
 
+// SocketScriptReport 是一次连接脚本运行的产物，随 Type="script" 的 SocketEvent
+// 下发：页面据此展示「预连接/发送/接收」脚本的日志、测试与写回的变量。
+type SocketScriptReport struct {
+	Phase string            `json:"phase"` // "pre" | "send" | "receive"
+	Error string            `json:"error"` // 脚本错误；空 = 成功
+	Logs  []ScriptLog       `json:"logs"`
+	Tests []ScriptTest      `json:"tests"`
+	Vars  map[string]string `json:"vars"` // 本次运行后的变量全量快照
+}
+
 // ResponseCookie is one cookie the response set.
 type ResponseCookie struct {
 	Name     string `json:"name"`
@@ -140,6 +150,17 @@ type SocketConnectParams struct {
 	// Version 是 Socket.IO 协议版本："4"（默认 = EIO4 / Socket.IO v3+）|
 	// "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
 	Version string `json:"version"`
+	// 预连接脚本（JS，goja 运行）：拨号前执行，nd.request 的 url/headers/query 可改写，
+	// 之后按 vars 展开 {{var}}；空 = 无。脚本出错则不拨号。
+	PreScript string `json:"preScript"`
+	// 发送消息脚本（JS，goja 运行）：每条消息发出前执行，nd.message.payload 可改写
+	//（isBinary/event 只读）；空 = 无。脚本出错则该条消息不发送。
+	SendScript string `json:"sendScript"`
+	// 接收消息脚本（JS，goja 运行）：每条收到的消息之后执行，nd.message 全只读；
+	// 空 = 无。脚本出错不影响消息本身。
+	ReceiveScript string `json:"receiveScript"`
+	// 变量快照：{{var}} 替换与脚本 nd.vars 的数据源；脚本写回后随 script 事件的 Vars 返回。
+	Vars map[string]string `json:"vars"`
 }
 
 // SocketSendParams 在已建立的连接上发送一条消息。
@@ -155,7 +176,7 @@ type SocketSendParams struct {
 
 // SocketEvent 是连接生命周期事件，Connect 存续期间经 stream 推送。
 type SocketEvent struct {
-	Type      string     `json:"type"`                // "open" | "message" | "error" | "close"
+	Type      string     `json:"type"`                // "open" | "message" | "error" | "close" | "script"
 	Direction string     `json:"direction,omitempty"` // message 专属："send" | "receive"
 	Payload   string     `json:"payload,omitempty"`   // message 内容；二进制为 base64
 	IsBinary  bool       `json:"isBinary,omitempty"`
@@ -168,6 +189,8 @@ type SocketEvent struct {
 	Event string `json:"event,omitempty"`
 	// IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。
 	IsAck bool `json:"isAck,omitempty"`
+	// Script 是脚本事件的产物：Type == "script" 时非空，其余事件为零值。
+	Script *SocketScriptReport `json:"script,omitempty"`
 }
 
 // GrpcListParams 问目标提供哪些服务与方法：方法描述来自服务器反射，
@@ -282,8 +305,10 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	Cookies         []KeyValue         `json:"cookies"`
 	Timeout         int                `json:"timeout"`
 	HTTP2           bool               `json:"http2"`
-	PreScript       string             `json:"preScript"`  // 预执行脚本；空 = 无
-	PostScript      string             `json:"postScript"` // 后执行脚本；空 = 无
+	PreScript       string             `json:"preScript"`     // 预执行脚本；空 = 无；socket kind 下为预连接脚本（改写 url/headers/query）
+	PostScript      string             `json:"postScript"`    // 后执行脚本；空 = 无
+	SendScript      string             `json:"sendScript"`    // 发送消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无
+	ReceiveScript   string             `json:"receiveScript"` // 接收消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无
 	Assertions      []SavedAssertion   `json:"assertions"`
 	Messages        []SavedMessage     `json:"messages"`        // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol  string             `json:"socketProtocol"`  // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用

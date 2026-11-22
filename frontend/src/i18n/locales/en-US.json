@@ -95,6 +95,9 @@
     "cookies": "Cookies",
     "preScript": "Pre-request Script",
     "postScript": "Post-response Script",
+    "preConnectScript": "Pre-connect Script",
+    "sendScript": "Send Script",
+    "receiveScript": "Receive Script",
     "messages": "Message",
     "events": "Events",
     "wsHeaders": "Headers",
@@ -283,7 +286,11 @@
     "closedByPeer": "Connection closed by the peer",
     "closedWithDetails": "Connection closed ({{details}})",
     "notConnected": "Not connected, click \"Connect\" first",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "scriptPhasePre": "Pre-connect",
+    "scriptPhaseSend": "Send",
+    "scriptPhaseReceive": "Receive",
+    "scriptError": "Script error: {{error}}"
   },
   "grpc": {
     "urlNeedsTarget": "Enter host:port, e.g. 127.0.0.1:50051",

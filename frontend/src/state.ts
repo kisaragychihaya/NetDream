@@ -109,10 +109,17 @@ export interface RequestState {
   grpcProtoFiles: string[];
   /** gRPC proto 的 import 搜索目录。 */
   grpcImportPaths: string[];
-  /** 预执行脚本；空 = 不执行。 */
+  /**
+   * 预执行脚本；空 = 不执行。HTTP 在发送前运行，连接类 kind（WS/TCP/Socket.IO）
+   * 里是「预连接脚本」：建立连接前运行。
+   */
   preScript: string;
-  /** 后执行脚本；空 = 不执行。 */
+  /** 后执行脚本；空 = 不执行（仅 HTTP）。 */
   postScript: string;
+  /** 发送脚本；空 = 不执行（仅 WS/TCP/Socket.IO：每条发出的消息先过它）。 */
+  sendScript: string;
+  /** 接收脚本；空 = 不执行（仅 WS/TCP/Socket.IO：每条收到的消息先过它）。 */
+  receiveScript: string;
   /** kind="markdown" 的文档内容；其余 kind 恒为空串。 */
   markdown: string;
   /** 响应示例（响应快照）；列表结构为将来扩展预留，目前只保存一条。 */
@@ -199,6 +206,8 @@ function defaultRequest(kind: RequestKind = "http"): RequestState {
     grpcImportPaths: [],
     preScript: "",
     postScript: "",
+    sendScript: "",
+    receiveScript: "",
     markdown: "",
     examples: [],
   };
@@ -742,6 +751,8 @@ function hydrate(source: Record<string, unknown>): RequestState {
     grpcImportPaths: textList(source.grpcImportPaths),
     preScript: text(source.preScript),
     postScript: text(source.postScript),
+    sendScript: text(source.sendScript),
+    receiveScript: text(source.receiveScript),
     markdown: text(source.markdown),
     examples: hydrateExamples(source.examples),
   };
@@ -937,6 +948,8 @@ function requestFromSaved(saved: SavedRequest): RequestState {
     grpcImportPaths: textList(saved.grpcImportPaths),
     preScript: text(saved.preScript),
     postScript: text(saved.postScript),
+    sendScript: text(saved.sendScript),
+    receiveScript: text(saved.receiveScript),
     markdown: text(saved.markdown),
     examples: saved.examples.map((example) => ({ ...example })),
   };
@@ -958,10 +971,13 @@ export function getWorkspaceGeneration(): number {
   return workspaceGeneration;
 }
 
-/** 工作区里是否有任何条目带前后脚本。 */
+/** 工作区里是否有任何条目带脚本（HTTP 前后脚本或连接类的三个脚本）。 */
 function workspaceHasScripts(): boolean {
-  return workspace.entries.some(
-    (entry) => entry.preScript.trim() !== "" || entry.postScript.trim() !== "",
+  // 字段缺失一律按空串算：旧 .band 里没有连接脚本字段，手工改过的文件也可能缺。
+  return workspace.entries.some((entry) =>
+    [entry.preScript, entry.postScript, entry.sendScript, entry.receiveScript].some(
+      (value) => typeof value === "string" && value.trim() !== "",
+    ),
   );
 }
 
@@ -1065,6 +1081,8 @@ export function newMarkdownDocument(): void {
     grpcImportPaths: [],
     preScript: "",
     postScript: "",
+    sendScript: "",
+    receiveScript: "",
     markdown: "",
     examples: [],
   };
@@ -1320,6 +1338,8 @@ export function snapshotCurrent(): SavedRequest {
     grpcImportPaths: [...state.grpcImportPaths],
     preScript: state.preScript,
     postScript: state.postScript,
+    sendScript: state.sendScript,
+    receiveScript: state.receiveScript,
     markdown: state.markdown,
     examples: state.examples.map((example) => ({ ...example })),
   };

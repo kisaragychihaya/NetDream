@@ -15,8 +15,8 @@ NetDream is a desktop API debugging tool: a Go backend that talks to the wire di
 - **HTTP debugging**: methods / headers / query / path params / body (form-data text and **file** fields, urlencoded, raw, binary), Basic / Bearer auth, cookies, timeouts
 - **HTTP/2**: ALPN negotiation on `https://`, forced h2c on `http://`, response protocol visible
 - **SSE streaming**: live event table, stop anytime
-- **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers
-- **Socket.IO debugging**: Socket.IO v3 / v4 / v5 (EIO4) and v2 (EIO3), URL path as namespace, configurable handshake path, event name + ack on send, per-event listen filtering (no reconnect needed)
+- **WebSocket / TCP debugging**: connect / disconnect, handshake headers / query params / subprotocols, message templates (Text / JSON / XML / HTML / Binary), live send/receive log, handshake response headers; **connection scripts**: pre-connect (rewrite URL / headers / query / variables), on-send (rewrite payload), on-receive (assert / log) hooks
+- **Socket.IO debugging**: Socket.IO v3 / v4 / v5 (EIO4) and v2 (EIO3), URL path as namespace, configurable handshake path, event name + ack on send, per-event listen filtering (no reconnect needed); same connection scripts as WebSocket
 - **gRPC debugging**: method discovery via server reflection or local .proto import; unary / server-streaming / client-streaming / bidirectional calls; JSON message editing with auto-filled input templates; call metadata; plaintext h2c or TLS (skip-verify, custom ServerName); status codes and trailers display
 - **Response view**: prettify (JSON / HTML syntax highlighting), raw body, sandboxed HTML preview, one-click copy; response examples save the current response into the request entry (persisted in .band) for later comparison
 - **Assertions panel**: status code, contains / not-contains, response time

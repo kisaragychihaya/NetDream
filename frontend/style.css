@@ -3228,3 +3228,26 @@ button:disabled {
   font-weight: 600;
   letter-spacing: 0.02em;
 }
+
+/* ---- 连接类 kind 的脚本页（预连接 / 发送 / 接收） ---- */
+
+/* 脚本行的阶段徽标：与收发方向的灰底徽标区分开，让「这行来自哪段脚本」一眼可见 */
+.sock-script {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+/* 脚本 console 输出按级别着色（log 走 .muted 灰），warn 橙；nd.test 通过的行绿 */
+.sock-row.warn .sock-payload {
+  color: var(--orange);
+}
+
+.sock-row.pass .sock-payload {
+  color: var(--green);
+}

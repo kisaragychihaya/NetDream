@@ -11,7 +11,9 @@ backend/
   close.go             # 窗口关闭守卫：OnClose 否决 + workspace:closeRequested 事件 + SetDirty/CloseWindow 支撑
   types.go             # IPC 类型：KeyValue、FormField、AuthInfo、APIRequest、ResponseCookie、APIResponse、ScriptLog、ScriptTest、SSEOpen、SSEEvent、SSEMessage、SocketConnectParams、SocketSendParams、SocketEvent、SavedAssertion、SavedMessage、SavedSocketEvent、SavedRequest、SavedFolder、WorkspaceData、WorkspaceFile
   service.go           # RequestService：Send（脚本编排）、PickFile（仅有的两个导出方法）+ APIRequest↔protocol.HTTPRequest / APIResponse↔protocol.HTTPResponse 的机械映射
-  socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配
+  socket.go            # SocketService 薄壳：Connect/Send/Disconnect 转调 protocol + *mygo.Channel[SocketEvent]→protocol.Sink 适配 + 脚本编排（预连接/发送/接收钩子）
+  socket_script.go     # 连接脚本宿主：三钩子执行、连接级登记表、串行运行与变量快照延续、script 事件组装
+  socket_script_test.go # 三钩子编排测试（真实 TCP 连接）：改写/失败不发送/只读/变量延续/取消
   grpc.go              # GrpcService 薄壳：List/Connect/Send/CloseSend/Disconnect 转调 protocol + *mygo.Channel[GrpcEvent]→protocol.GrpcSink 适配
   script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
   script_test.go       # 脚本日志/测试结果的保留上限、按 rune 截断、Go 侧 pbkdf2 的可取消性
@@ -38,6 +40,7 @@ frontend/
     state.ts           # 请求/响应/工作区/变量状态 + SSE 事件合帧与保留上限 + localStorage 持久化 + 事件
     socket.ts          # SocketSession（连接状态/日志）+ connect/send/disconnect 动作
     grpc.ts            # GrpcSession（调用状态/日志/元数据/trailer）+ grpcCall/sendGrpcMessage/closeGrpcSend/disconnectGrpc + 方法表
+    scriptGate.ts      # 脚本信任门（HTTP send 与 socket connect 共用）：不可信工作区先弹确认再放行
     assert.ts          # 断言规则模型 + runAssertions 纯函数
     components/
       urlBar.ts        # 方法下拉 + URL + 发送按钮（kind 感知：Socket 显示 连接/断开）
@@ -57,7 +60,7 @@ frontend/
       assertionsPanel.ts # 断言与校验侧栏
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
       closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
-      scriptTrust.ts   # 脚本信任确认框（打开的 .band 带脚本时，首次执行脚本前问一次）
+      scriptTrust.ts   # 脚本信任确认框（打开的 .band 带脚本时，首次执行脚本前问一次；HTTP send 与 socket connect 经 scriptGate.ts 共用）
   src/mygo.ts          # `mygo generate` 生成，禁止手改
   style.css
 scripts/
@@ -213,6 +216,22 @@ type SocketConnectParams struct {
 	// Version 是 Socket.IO 协议版本："4"（默认 = EIO4 / Socket.IO v3+）|
 	// "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
 	Version string `json:"version"`
+	// 三个连接脚本（goja，语义见「Socket 脚本」节）；空 = 不执行。
+	PreScript     string            `json:"preScript"`     // 预连接脚本：可改写 url/headers/query 与变量；失败不拨号
+	SendScript    string            `json:"sendScript"`    // 发送消息脚本：nd.message.payload 可改写；失败不发送
+	ReceiveScript string            `json:"receiveScript"` // 接收消息脚本：nd.message 只读
+	Vars          map[string]string `json:"vars"`          // 变量快照：{{var}} 替换与 nd.vars 的数据源
+}
+
+// SocketScriptReport 是一次连接脚本执行的产物，Type == "script" 的
+// SocketEvent 经 Script 字段携带（logs → tests → error 顺序；Vars 是本次运行后的
+// 变量全量快照，前端无条件下发写回，同 HTTP 响应的 vars 语义）。
+type SocketScriptReport struct {
+	Phase string            `json:"phase"` // "pre" | "send" | "receive"
+	Error string            `json:"error"` // 脚本错误；空 = 成功
+	Logs  []ScriptLog       `json:"logs"`
+	Tests []ScriptTest      `json:"tests"`
+	Vars  map[string]string `json:"vars"`
 }
 
 // SocketSendParams 在已建立的连接上发送一条消息。
@@ -241,6 +260,10 @@ type SocketEvent struct {
 	Event string `json:"event,omitempty"`
 	// IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。
 	IsAck bool `json:"isAck,omitempty"`
+
+	// Script 是 Type == "script" 时携带的脚本执行报告（预连接/发送/接收钩子）；
+	// 其余事件为 nil（omitempty 不出现在 JSON 里）。
+	Script *SocketScriptReport `json:"script,omitempty"`
 }
 ```
 
@@ -450,6 +473,31 @@ gRPC 接口调试：一元 / 服务端流式 / 客户端流式 / 双向流式四
 - `CloseSend(id string) error` — 半关闭（幂等）；半关闭后再 Send 报错。
 - `Disconnect(id string)` — 取消调用；不存在静默返回。
 
+#### Socket 脚本（backend/socket_script.go，编排全在 main 包，protocol 零改动）
+
+WS / TCP / Socket.IO 的三个连接脚本，复用 HTTP 的 goja 引擎（每次运行新建
+runtime、5s 超时、页面关闭/断开可取消、日志/测试保留上限同款）。连接级宿主
+（`socketScriptHost`）随 Connect 注册、返回时注销；**同一连接的脚本运行串行**
+（条目内互斥），`nd.vars` 在钩子间延续（Connect 收到的快照进宿主，每次运行后
+以全量 outcome 更新）。产物经 `Type == "script"` 的 SocketEvent 推给页面。
+
+- **预连接脚本**（PreScript，kind 名「预连接脚本」）：拨号前执行；
+  `nd.request = {url, headers, query}`（无 method/body）可写并回写
+  （headers/query 用 HTTP 同款大小写不敏感 diff）；随后对 URL/Params/Headers
+  做 `{{var}}` 展开（无脚本也展开，与 HTTP 一致）。**失败不拨号**：script 事件
+  带 Error，Connect 返回该 error。
+- **发送脚本**（SendScript，onSend）：`SocketService.Send` 里、转调 protocol 前
+  执行；`nd.message = {payload, isBinary, event}`，**payload 可写**（改写后的
+  内容才真正发出；设成 undefined/未改动都发原件），isBinary/event 只读
+  （goja 数据属性 writable=false）。**失败不发送**：script 事件带 Error，Send
+  返回 error。
+- **接收脚本**（ReceiveScript，onReceive）：main 的 channelSink 转发时拦截
+  `message/receive`——**消息先到页面**再跑脚本（只读视图，崩溃不影响消息、
+  不停连接）；跑在协议读 goroutine 上，顺序即消息到达顺序（代价：单次最长
+  5s 的脚本会推迟下一次读取）。
+- `nd.message` 形状：`{payload, isBinary, event}`（ndapi/message.go；二进制为
+  base64 文本，event 仅 Socket.IO 有值）。
+
 ### 工作区（.band）
 
 `.band` 有两种容器，按文件头 sniff（前 4 字节）区分：
@@ -654,8 +702,10 @@ type SavedRequest struct { // RequestState 的快照 + 展示名
 	Cookies    []KeyValue       `json:"cookies"`
 	Timeout    int              `json:"timeout"`
 	HTTP2      bool             `json:"http2"`
-	PreScript  string           `json:"preScript"`  // 预执行脚本；空 = 无
-	PostScript string           `json:"postScript"` // 后执行脚本；空 = 无
+	PreScript  string           `json:"preScript"`  // 预执行脚本（HTTP）/ 预连接脚本（WS/TCP/Socket.IO）；空 = 无
+	PostScript string           `json:"postScript"` // 后执行脚本；空 = 无（仅 HTTP）
+	SendScript    string        `json:"sendScript"`    // 发送消息脚本（onSend）；仅 WS/TCP/Socket.IO 使用
+	ReceiveScript string        `json:"receiveScript"` // 接收消息脚本（onReceive）；仅 WS/TCP/Socket.IO 使用
 	Assertions []SavedAssertion `json:"assertions"`
 	Messages   []SavedMessage   `json:"messages"`       // WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求）
 	SocketProtocol string       `json:"socketProtocol"` // WS 子协议（Sec-WebSocket-Protocol），逗号分隔；仅 WS 使用
@@ -804,6 +854,8 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   （kind="markdown" 的文档内容，其余 kind 恒为空串）。**gRPC 追加**：`grpcMethod`
   （选中的方法 "pkg.Service/Method"）、`grpcPlaintext`（默认 true）、`grpcTlsSkipVerify`、
   `grpcServerName`、`grpcProtoFiles`/`grpcImportPaths`（本地描述来源；非空即 proto 模式）。
+  **连接脚本**：`preScript`（socket kind 下为预连接脚本，与 HTTP 预执行脚本同字段）、
+  `sendScript`/`receiveScript`（发送/接收消息钩子，仅 WS/TCP/Socket.IO）。
   messages/socketEvents 与这些字段随 .band 持久化并原样回读。
 - 变量 store（应用级，随工作区文件保存）：`getVars/setVars/updateVars/subscribeVars`，
   **纯内存、不写 localStorage**（关闭即清空，避免凭据外泄）；`loadWorkspace` 用
@@ -858,12 +910,20 @@ Transport 复用：普通请求与 h2c 各只有一个包级共享的 transport�
   **上限 500 条**。
 - `connectSocket()`：校验 URL（WS 须 `ws://`/`wss://` 开头；Socket.IO 须 `http://`/`https://`
   开头且 host 非空；TCP 须 `host:port`），不合法直接 `updateResponse({error})` 提示并返回；
+  **三个连接脚本任一非空时先过脚本信任门**（`scriptGate.ts`，与 HTTP send 共用的
+  两键弹窗 + generation/editor 守卫，确认后从 `connectSocket()` 重来）；
   `connId = crypto.randomUUID()`；构造 `Channel<SocketEvent>` 调
-  `SocketService.connect(params, channel)`（Socket.IO 额外带 `path`/`version`）：
+  `SocketService.connect(params, channel)`（Socket.IO 额外带 `path`/`version`；
+  params 另带 `preScript`/`sendScript`/`receiveScript` 与 `vars` 变量快照）：
   - `open` → status=open、记录握手头、**立即入册内存工作区**（同 SSE 语义）；
     Socket.IO 且没有任何启用的监听事件时追加一条灰色提示；
   - `message` → 追加日志（带事件名）；**Socket.IO 的入站事件在这里过滤**：`isAck` 恒显示，
     其余按 `socketEvents` 的 `enabled` 判定，未勾选的直接丢弃（不重连、即时生效）；
+  - `script`（脚本执行报告，`handleScriptReport`）→ 按 logs → tests → error 顺序批量
+    落成系统行：console 按级别着色（log 灰/warn 橙/error 红）+ 阶段徽标
+    （预连接/发送/接收），nd.test ✓ 绿 / ✗ 红（失败附原因），error 红行进错误条；
+    `vars` 无条件下发写回 store（`setVars`，HTTP 同款语义）；预连接脚本出错时
+    会话收尾为 closed（后端不拨号）；
   - `error`/`close` → 日志记系统行（红/灰）并置 status=closed；
   - channel onclose → 清理 in-flight 状态；Connect 返回的拒绝若 `stoppedByUser` 则吞掉。
 - `sendSocketMessage({payload, isBinary, event, ack})` → `SocketService.send`（发送日志由后端
@@ -918,13 +978,17 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     TCP「请输入主机:端口，如 127.0.0.1:7000」、Socket.IO「http://localhost:6021」；
     右侧按钮随会话状态在 连接/断开 间切换（connecting/open 显示 断开）。
   - **请求页签集**：HTTP = 现有 8 页（预执行脚本 / 后执行脚本页挂 Monaco 编辑器，
-    见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib）；
-    WS = 发送消息 / 请求头 / 请求参数 / 设置（设置 = 子协议输入框，映射 `socketProtocol`）；
-    **Socket.IO = 发送消息 / 事件 / 请求头 / 请求参数 / 设置**（设置 = 客户端版本 +
+    见 scriptEditor.ts；语法补全来自 monacoSetup.ts 的 nd API extraLib，含连接脚本的
+    `nd.message` 视图声明）；
+    WS = 发送消息 / 请求头 / 请求参数 / 预连接脚本 / 发送脚本 / 接收脚本 / 设置
+    （设置 = 子协议输入框，映射 `socketProtocol`；三个脚本页挂 Monaco，分别读写
+    `preScript` / `sendScript` / `receiveScript`）；
+    **Socket.IO = 发送消息 / 事件 / 请求头 / 请求参数 / 预连接脚本 / 发送脚本 /
+    接收脚本 / 设置**（设置 = 客户端版本 +
     握手路径，映射 `socketIOVersion` / `socketIOPath`）；**gRPC = 方法 / 消息 /
     Metadata / 设置**（方法 = 获取与选择（`grpcMethod`），消息 = JSON 模板编辑
     （`raw`）+ 流式发送，Metadata = 调用元数据（`headers`），设置 = 传输与描述来源）；
-    TCP = 发送消息。同样用 tabs.ts。
+    TCP = 发送消息 / 预连接脚本 / 发送脚本 / 接收脚本。同样用 tabs.ts。
     - **编辑器按需加载**：Monaco 与 Vditor 都是首次切到对应页/条目时才 `import()`。
       `monacoSetup.ts` 导出 `loadMonaco(): Promise<MonacoApi>`，`scriptEditor.ts` 的
       `ensure()` 第一次被调用才建实例；`markdownEditor.ts` 同样（Vditor 与它的 CSS
@@ -1086,7 +1150,8 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   （打开时的签名者信任窗）、`components/saveDialog.ts`（保存选项：加密 + 收件人）。
 - **脚本信任边界**（不可信 .band 的预脚本能外带数据）：打开的 .band 里的预脚本能读
   `nd.vars`、请求头、请求体，改写 URL/请求，再由后端附上 Basic/Bearer 发出——一份
-  文件就足以把变量里的凭据送到任意地址。所以 `loadWorkspace` 时 `scriptsTrusted =
+  文件就足以把变量里的凭据送到任意地址（连接脚本的预连接钩子同理能改写连接地址）。
+  所以 `loadWorkspace` 时 `scriptsTrusted =
   !workspaceHasScripts() || file.signatureTrusted`（**本地恢复的会话与 `newWorkspace` 恒
   可信**，没有脚本的工作区不受影响；**v2 已验签且签名者已获信任——含「信任一次」——的
   工作区也直接可信**，身份已经密码学确认过，v1 与未签名 v2 不在其列），`send()` 在带
@@ -1096,6 +1161,9 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
   才 `trustWorkspaceScripts()` 并重新走一遍 `send()`，否则什么都不做——弹框期间拖入/打开
   另一份工作区不会被这次确认放过。信任只对本次载入有效：重新打开 .band、拖入另一个
   或新建工作区都会重置（generation 推进），切换条目也绕不过（逐次发送都校验）。
+  这套流程抽在 `scriptGate.ts`（`requireScriptTrust`），HTTP `send()` 与 socket
+  `connectSocket()`（三个连接脚本任一非空时）共用；`workspaceHasScripts()` 把
+  发送/接收脚本也算作「工作区带脚本」。
   文案在 `dialog.scriptTrust*`（三语）。
 - UI（components/workspaceSidebar.ts）：index.html 结构改为
   `<main id="app">` 两列网格——左 `<aside id="workspace-sidebar">`，原全部内容包进

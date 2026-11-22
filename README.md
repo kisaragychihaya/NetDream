@@ -17,8 +17,8 @@ NetDream 是一个跑在桌面上的 API 调试工具：Go 后端直接发包，
 - **HTTP 调试**：方法 / Header / Query / Path 参数 / Body（form-data 文本与**文件**字段、urlencoded、raw、binary）、Basic / Bearer 认证、Cookie、超时
 - **HTTP/2**：`https://` 自动协商，`http://` 可强制 h2c，响应协议版本可见
 - **SSE 流式响应**：事件实时列表、随时停止
-- **WebSocket / TCP 调试**：连接 / 断开、握手请求头 / 查询参数 / 子协议、消息模板（Text / JSON / XML / HTML / Binary）、实时收发日志、握手响应头
-- **Socket.IO 调试**：Socket.IO v3 / v4 / v5（EIO4）与 v2（EIO3）、URL 路径即命名空间、握手路径可配、发送带事件名与 Ack、按事件勾选监听（切换免重连）
+- **WebSocket / TCP 调试**：连接 / 断开、握手请求头 / 查询参数 / 子协议、消息模板（Text / JSON / XML / HTML / Binary）、实时收发日志、握手响应头；**连接脚本**：预连接（改写地址 / 请求头 / 查询参数与变量）、发送（改写消息内容）、接收（断言 / 日志）三钩子
+- **Socket.IO 调试**：Socket.IO v3 / v4 / v5（EIO4）与 v2（EIO3）、URL 路径即命名空间、握手路径可配、发送带事件名与 Ack、按事件勾选监听（切换免重连）；与 WebSocket 同款连接脚本
 - **gRPC 调试**：服务器反射 / 本地 .proto 导入获取方法，一元 / 服务端流式 / 客户端流式 / 双向流式四种形态，JSON 消息编辑（输入模板自动填充）、调用元数据、明文 h2c / TLS（可跳过校验、自定义 ServerName）、状态码与 Trailers 展示
 - **响应视图**：美化（JSON / HTML 语法高亮）、原始报文、HTML 沙箱预览、一键复制；响应示例可把当前响应一键存入请求条目（.band 落盘），方便后续查看对比
 - **断言面板**：状态码、包含 / 不包含、响应耗时

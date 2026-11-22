@@ -29,7 +29,11 @@ type Run struct {
 	body    string          // nd.request.body as injected, to tell an edit from the original
 	vars    *goja.Object
 	request *goja.Object
-	report  Recorder
+	message *goja.Object
+	// messagePayload is nd.message.payload as injected, to tell an edit from the
+	// original.
+	messagePayload string
+	report         Recorder
 }
 
 // NewRun builds the ND API state of one run on vm: nd.vars holds vars as it came

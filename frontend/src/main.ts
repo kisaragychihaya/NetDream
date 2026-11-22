@@ -14,7 +14,6 @@ import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
 import { mountSaveDialog } from "./components/saveDialog";
 import { mountScriptEditor } from "./components/scriptEditor";
-import { mountScriptTrustDialog } from "./components/scriptTrust";
 import { mountSettings } from "./components/settings";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
 import { mountSocketEventsEditor } from "./components/socketEventsEditor";
@@ -26,6 +25,7 @@ import { applyStatic, onLangChange, t } from "./i18n";
 import type { APIRequest, SavedRequest, SSEMessage, WorkspaceFile, WorkspaceOpen } from "./mygo";
 import { IdentityService, RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import { isMyGo } from "./runtime";
+import { requireScriptTrust } from "./scriptGate";
 import {
   disconnectGrpc,
   getGrpcSession,
@@ -64,7 +64,6 @@ import {
   renameEntry,
   renameFolder,
   renameWorkspace,
-  scriptsTrustedInWorkspace,
   setCachedIdentity,
   setFormFilePath,
   setStreamChannel,
@@ -74,7 +73,6 @@ import {
   setWorkspacePath,
   snapshotCurrent,
   subscribe,
-  trustWorkspaceScripts,
   updateRequest,
   updateResponse,
   upsertEntry,
@@ -93,6 +91,9 @@ function requestTabs(kind: RequestKind): TabDef[] {
         { id: "messages", label: t("tabs.messages") },
         { id: "headers", label: t("tabs.wsHeaders") },
         { id: "query", label: t("tabs.wsQuery") },
+        { id: "pre-script", label: t("tabs.preConnectScript") },
+        { id: "send-script", label: t("tabs.sendScript") },
+        { id: "receive-script", label: t("tabs.receiveScript") },
         { id: "settings", label: t("tabs.settings") },
       ];
     case "socketio":
@@ -101,6 +102,9 @@ function requestTabs(kind: RequestKind): TabDef[] {
         { id: "events", label: t("tabs.events") },
         { id: "headers", label: t("tabs.wsHeaders") },
         { id: "query", label: t("tabs.wsQuery") },
+        { id: "pre-script", label: t("tabs.preConnectScript") },
+        { id: "send-script", label: t("tabs.sendScript") },
+        { id: "receive-script", label: t("tabs.receiveScript") },
         { id: "settings", label: t("tabs.settings") },
       ];
     case "grpc":
@@ -113,7 +117,12 @@ function requestTabs(kind: RequestKind): TabDef[] {
         { id: "settings", label: t("tabs.settings") },
       ];
     case "tcp":
-      return [{ id: "messages", label: t("tabs.messages") }];
+      return [
+        { id: "messages", label: t("tabs.messages") },
+        { id: "pre-script", label: t("tabs.preConnectScript") },
+        { id: "send-script", label: t("tabs.sendScript") },
+        { id: "receive-script", label: t("tabs.receiveScript") },
+      ];
     default:
       return [
         { id: "headers", label: t("tabs.headers") },
@@ -161,6 +170,9 @@ for (const id of [
   "post",
   "messages",
   "events",
+  "pre-script",
+  "send-script",
+  "receive-script",
   "grpc-methods",
   "grpc-messages",
   "grpc-metadata",
@@ -254,12 +266,8 @@ async function send(): Promise<void> {
   const hasScripts = editor.preScript.trim() !== "" || editor.postScript.trim() !== "";
   // 打开的 .band 里的脚本能读变量、请求头与请求体，把数据改写进 URL 再由后端
   // 附加认证发出去：本次载入没确认过信任之前一条都不发。确认后从 send() 重来，
-  // 按当时的编辑器与工作区重新判断（见 pendingTrust）。
-  if (hasScripts && !scriptsTrustedInWorkspace()) {
-    pendingTrust = { generation: getWorkspaceGeneration(), editor };
-    scriptTrustDialog.open();
-    return;
-  }
+  // 按当时的编辑器与工作区重新判断（信任门与 socket 连接共用，见 scriptGate.ts）。
+  if (hasScripts && !requireScriptTrust(editor, () => void send())) return;
 
   const execution: Execution = {
     id: (executionSeq += 1),
@@ -384,22 +392,6 @@ function workspaceData(): WorkspaceData {
 
 // 三键确认框是单例：对话框已经打开时，任何守卫的新触发都被忽略。
 const confirmDialog = mountConfirmDialog({ save: () => saveWorkspace(false) });
-
-// 脚本信任确认框（见 send）打开时的上下文：确认必须落回同一份工作区（generation）
-// 与同一个编辑器。弹框期间拖入/打开了别的工作区，这次确认直接作废。
-let pendingTrust: { generation: number; editor: RequestState } | null = null;
-
-const scriptTrustDialog = mountScriptTrustDialog({
-  trust: () => {
-    const pending = pendingTrust;
-    pendingTrust = null;
-    if (pending === null) return;
-    if (getWorkspaceGeneration() !== pending.generation || getRequest() !== pending.editor) return;
-    trustWorkspaceScripts();
-    // 信任的判定按当前工作区重算：send() 自己会再过一遍守卫。
-    void send();
-  },
-});
 
 interface UnsavedGuard {
   /** 放弃未保存改动那一键的文案键。 */
@@ -718,6 +710,46 @@ const postScriptEditor = mountScriptEditor(
 
 lazyViews.set("pre", preScriptEditor);
 lazyViews.set("post", postScriptEditor);
+
+// 连接类 kind 的三个脚本页（WS/TCP/Socket.IO）：各挂一个 Monaco 实例，分别读写
+// preScript（预连接脚本）/ sendScript / receiveScript。实例同样惰性创建，页签第一次
+// 显示时才 ensure；HTTP 的两个脚本页仍是上面那一对，互不影响。
+const socketPreScriptEditor = mountScriptEditor(
+  viewOf("pre-script"),
+  () => getRequest().preScript,
+  (value) => {
+    updateRequest((state) => {
+      state.preScript = value;
+    });
+  },
+  subscribe,
+);
+
+const socketSendScriptEditor = mountScriptEditor(
+  viewOf("send-script"),
+  () => getRequest().sendScript,
+  (value) => {
+    updateRequest((state) => {
+      state.sendScript = value;
+    });
+  },
+  subscribe,
+);
+
+const socketReceiveScriptEditor = mountScriptEditor(
+  viewOf("receive-script"),
+  () => getRequest().receiveScript,
+  (value) => {
+    updateRequest((state) => {
+      state.receiveScript = value;
+    });
+  },
+  subscribe,
+);
+
+lazyViews.set("pre-script", socketPreScriptEditor);
+lazyViews.set("send-script", socketSendScriptEditor);
+lazyViews.set("receive-script", socketReceiveScriptEditor);
 
 // Markdown 文档编辑器：实例惰性创建（ensure），内容双向绑定到当前条目的 markdown 字段。
 const markdownEditor = mountMarkdownEditor(

@@ -329,10 +329,14 @@ export interface SavedRequest {
   cookies: KeyValue[];
   timeout: number;
   http2: boolean;
-  /** 预执行脚本；空 = 无 */
+  /** 预执行脚本；空 = 无；socket kind 下为预连接脚本（改写 url/headers/query） */
   preScript: string;
   /** 后执行脚本；空 = 无 */
   postScript: string;
+  /** 发送消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无 */
+  sendScript: string;
+  /** 接收消息脚本；仅 WS/TCP/Socket.IO 使用，空 = 无 */
+  receiveScript: string;
   assertions: SavedAssertion[];
   /** WS/TCP/Socket.IO 使用；nil 落盘补 []（生成 TS 类型要求） */
   messages: SavedMessage[];
@@ -409,11 +413,28 @@ export interface SocketConnectParams {
    * "3"（= EIO3 / Socket.IO v2，心跳方向相反）；仅 socketio 使用。
    */
   version: string;
+  /**
+   * 预连接脚本（JS，goja 运行）：拨号前执行，nd.request 的 url/headers/query 可改写，
+   * 之后按 vars 展开 {{var}}；空 = 无。脚本出错则不拨号。
+   */
+  preScript: string;
+  /**
+   * 发送消息脚本（JS，goja 运行）：每条消息发出前执行，nd.message.payload 可改写
+   * （isBinary/event 只读）；空 = 无。脚本出错则该条消息不发送。
+   */
+  sendScript: string;
+  /**
+   * 接收消息脚本（JS，goja 运行）：每条收到的消息之后执行，nd.message 全只读；
+   * 空 = 无。脚本出错不影响消息本身。
+   */
+  receiveScript: string;
+  /** 变量快照：{{var}} 替换与脚本 nd.vars 的数据源；脚本写回后随 script 事件的 Vars 返回。 */
+  vars: Record<string, string>;
 }
 
 /** SocketEvent 是连接生命周期事件，Connect 存续期间经 stream 推送。 */
 export interface SocketEvent {
-  /** "open" | "message" | "error" | "close" */
+  /** "open" | "message" | "error" | "close" | "script" */
   type: string;
   /** message 专属："send" | "receive" */
   direction?: string;
@@ -434,6 +455,23 @@ export interface SocketEvent {
   event?: string;
   /** IsAck 标记这条 message 是 Socket.IO 的 ack 回答（Event 为原事件名，Payload 为 ack 参数）。 */
   isAck?: boolean;
+  /** Script 是脚本事件的产物：Type == "script" 时非空，其余事件为零值。 */
+  script?: SocketScriptReport;
+}
+
+/**
+ * SocketScriptReport 是一次连接脚本运行的产物，随 Type="script" 的 SocketEvent
+ * 下发：页面据此展示「预连接/发送/接收」脚本的日志、测试与写回的变量。
+ */
+export interface SocketScriptReport {
+  /** "pre" | "send" | "receive" */
+  phase: string;
+  /** 脚本错误；空 = 成功 */
+  error: string;
+  logs: ScriptLog[];
+  tests: ScriptTest[];
+  /** 本次运行后的变量全量快照 */
+  vars: Record<string, string>;
 }
 
 /** SocketSendParams 在已建立的连接上发送一条消息。 */
@@ -575,8 +613,9 @@ export const WorkspaceService = {
 /**
  * SocketService opens WebSocket, TCP and Socket.IO connections the page talks
  * over. The connections themselves live in backend/protocol; this shell maps
- * the page's contract types onto it. Every exported method here is bound to the
- * frontend, so helpers stay unexported.
+ * the page's contract types onto it, and runs the connection's scripts around
+ * what it asks the protocol package to do. Every exported method here is bound
+ * to the frontend, so helpers stay unexported.
  */
 export const SocketService = {
   /**

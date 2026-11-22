@@ -95,6 +95,9 @@
     "cookies": "Cookie",
     "preScript": "実行前スクリプト",
     "postScript": "実行後スクリプト",
+    "preConnectScript": "接続前スクリプト",
+    "sendScript": "送信スクリプト",
+    "receiveScript": "受信スクリプト",
     "messages": "メッセージ送信",
     "events": "イベント",
     "wsHeaders": "リクエストヘッダー",
@@ -283,7 +286,11 @@
     "closedByPeer": "接続が相手側から閉じられました",
     "closedWithDetails": "接続が閉じられました（{{details}}）",
     "notConnected": "接続が確立されていません。先に「接続」をクリックしてください",
-    "disconnected": "接続を切断しました"
+    "disconnected": "接続を切断しました",
+    "scriptPhasePre": "接続前",
+    "scriptPhaseSend": "送信",
+    "scriptPhaseReceive": "受信",
+    "scriptError": "スクリプトエラー: {{error}}"
   },
   "grpc": {
     "urlNeedsTarget": "ホスト:ポートを入力してください（例: 127.0.0.1:50051）",

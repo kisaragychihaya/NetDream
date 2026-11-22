@@ -142,16 +142,26 @@ func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIR
 // newScriptRun builds a fresh runtime with nd and console injected. Nothing is
 // shared between runs: a new goja runtime per script is the isolation.
 func newScriptRun(kind string, req *APIRequest, resp *APIResponse, vars map[string]string) *scriptRun {
+	run := newScriptRunBase(kind, vars)
+	if req != nil {
+		run.setND("request", run.api.RequestGlobal(scriptRequest(req)))
+	}
+	if resp != nil {
+		run.setND("response", run.api.ResponseGlobal(scriptResponse(resp)))
+	}
+	return run
+}
+
+// newScriptRunBase builds the runtime every hook starts from: nd with the
+// shared helpers a script reaches for whatever it runs for. A hook attaches the
+// views it adds (nd.request, nd.response, nd.message) on top.
+func newScriptRunBase(kind string, vars map[string]string) *scriptRun {
 	vm := goja.New()
 	run := &scriptRun{vm: vm, kind: kind}
 	run.api = ndapi.NewRun(vm, vars, run)
 
 	nd := vm.NewObject()
 	_ = nd.Set("vars", run.api.VarsGlobal())
-	_ = nd.Set("request", run.api.RequestGlobal(scriptRequest(req)))
-	if resp != nil {
-		_ = nd.Set("response", run.api.ResponseGlobal(scriptResponse(resp)))
-	}
 	_ = nd.Set("test", run.api.TestGlobal())
 	_ = nd.Set("assert", run.api.AssertGlobal())
 	_ = nd.Set("crypto", run.api.CryptoGlobal())
@@ -160,6 +170,15 @@ func newScriptRun(kind string, req *APIRequest, resp *APIResponse, vars map[stri
 	_ = vm.Set("nd", nd)
 	_ = vm.Set("console", run.api.ConsoleGlobal())
 	return run
+}
+
+// setND adds one more view to the nd object the run injected.
+func (run *scriptRun) setND(key string, value goja.Value) {
+	nd, ok := run.vm.Get("nd").(*goja.Object)
+	if !ok {
+		return
+	}
+	_ = nd.Set(key, value)
 }
 
 // scriptRequest is the request as a pre script sees it.

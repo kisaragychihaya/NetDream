@@ -28,6 +28,10 @@ interface NDVars {
 /**
  * 请求信息：预执行脚本里可写，改动作用于本次发送。
  * 后执行脚本里为只读快照。
+ *
+ * WebSocket / Socket.IO 的「预连接脚本」里只有 url、headers、query 三项生效
+ * （没有 method 与 body，写了也不会作用到连接上）：url 是连接地址，headers 是
+ * 握手请求头，query 是握手查询参数。TCP 只用 url（host:port）。
  */
 interface NDRequest {
   /** 请求方法，如 "GET"。 */
@@ -58,6 +62,19 @@ interface NDResponse {
   sizeBytes: number;
   /** 把响应体解析成 JSON；解析失败会抛异常。 */
   json(): any;
+}
+
+/**
+ * 一条连接消息：WebSocket / TCP / Socket.IO 的「发送脚本」与「接收脚本」里可用。
+ * 发送脚本里 payload 可写（改写本次要发出的内容），接收脚本里是只读快照。
+ */
+interface NDMessage {
+  /** 消息内容：文本消息为原文，二进制消息为 base64。发送脚本里可写。 */
+  payload: string;
+  /** 是否为二进制消息（此时 payload 是 base64）；只读。 */
+  isBinary: boolean;
+  /** Socket.IO 的事件名；ws/tcp 为空串。只读。 */
+  event: string;
 }
 
 /** 摘要输出的编码方式：hex（默认）、标准 base64、URL 安全 base64（无 padding）。 */
@@ -249,6 +266,8 @@ interface ND {
   vars: NDVars;
   /** 请求信息；预执行脚本可写。 */
   request: NDRequest;
+  /** 连接消息；仅 WebSocket / TCP / Socket.IO 的发送脚本与接收脚本可用。 */
+  message: NDMessage;
   /** 响应信息；仅后执行脚本可用。 */
   response: NDResponse;
   /** 记录一条测试结果到「断言与校验」的「脚本测试」：fn 抛异常即视为失败。 */

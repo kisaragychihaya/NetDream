@@ -1,15 +1,27 @@
 import { Channel } from "mygo-runtime";
 import { t } from "./i18n";
-import type { KeyValue, SocketConnectParams, SocketEvent } from "./mygo";
+import type { KeyValue, SocketConnectParams, SocketEvent, SocketScriptReport } from "./mygo";
 import { SocketService } from "./mygo";
-import { getRequest, updateResponse, wireValues, type RequestKind } from "./state";
+import { requireScriptTrust } from "./scriptGate";
+import {
+  getRequest,
+  getVars,
+  setVars,
+  updateResponse,
+  wireValues,
+  type RequestKind,
+  type RequestState,
+} from "./state";
 
 export type SocketStatus = "idle" | "connecting" | "open" | "closed";
+
+/** 脚本执行的阶段：预连接脚本、发送脚本、接收脚本。 */
+export type ScriptPhase = "pre" | "send" | "receive";
 
 export interface SocketLogEntry {
   id: string;
   at: number;
-  /** send/receive 是收发消息；system 是连接状态与被后端拒绝的行。 */
+  /** send/receive 是收发消息；system 是连接状态、被后端拒绝的行与脚本输出。 */
   direction: "send" | "receive" | "system";
   payload: string;
   isBinary: boolean;
@@ -17,8 +29,10 @@ export interface SocketLogEntry {
   event?: string;
   /** 这条 receive 是 Socket.IO 的 ack 回答（发送时勾了 Ack 才有）。 */
   isAck?: boolean;
-  /** 系统行的着色：错误红、其余灰。 */
-  tone?: "error" | "muted";
+  /** 系统行的着色：错误红、提示/日志灰、脚本警告橙、脚本测试通过绿。 */
+  tone?: "error" | "muted" | "warn" | "pass";
+  /** 脚本行的阶段徽标（预连接/发送/接收）；非脚本行为 undefined。 */
+  phase?: ScriptPhase;
   /** 系统行的词典键与插值变量：存结构而不是成品文案，切语言后按当前语言显示。 */
   i18n?: { key: string; vars?: Record<string, string | number> };
 }
@@ -109,6 +123,15 @@ function appendLog(entry: SocketLogEntry): void {
   notifySocket();
 }
 
+// 一批行一次落地、只通知一次：一段脚本可能刷出上千条 console 输出，逐条通知会让
+// 日志面板每行都重算一次滚动位置。
+function appendLogs(entries: SocketLogEntry[]): void {
+  if (entries.length === 0) return;
+  session.log.push(...entries);
+  if (session.log.length > SOCKET_LOG_LIMIT) session.log.splice(0, session.log.length - SOCKET_LOG_LIMIT);
+  notifySocket();
+}
+
 export function clearSocketLog(): void {
   if (session.log.length === 0) return;
   session.log = [];
@@ -153,6 +176,15 @@ function urlProblem(kind: RequestKind, url: string): string | null {
   return t("socket.httpNoConnect");
 }
 
+// socketHasScripts reports whether any of the three connection scripts has code.
+function socketHasScripts(request: RequestState): boolean {
+  return (
+    request.preScript.trim() !== "" ||
+    request.sendScript.trim() !== "" ||
+    request.receiveScript.trim() !== ""
+  );
+}
+
 // connectSocket dials the connection the editor describes. Connect stays for
 // the life of the connection, so it is not awaited: events arrive on the
 // channel and the session shows them.
@@ -165,6 +197,11 @@ export function connectSocket(): void {
     return;
   }
 
+  // 脚本信任门与 HTTP send 共用：打开的 .band 里的预连接脚本能改写连接地址与
+  // 请求头，也能把变量发出去，本次载入没确认过信任之前不拨号。确认后从
+  // connectSocket() 重来，按当时的编辑器与工作区重新判断（见 scriptGate.ts）。
+  if (socketHasScripts(request) && !requireScriptTrust(request, () => connectSocket())) return;
+
   const kind: RequestKind = request.kind;
   const params: SocketConnectParams = {
     id: newId(),
@@ -175,6 +212,12 @@ export function connectSocket(): void {
     protocol: request.socketProtocol.trim(),
     path: request.socketIOPath.trim(),
     version: request.socketIOVersion.trim(),
+    // 三个脚本随连接下发（空 = 不执行）；变量取当前 store 的快照，同 HTTP
+    // buildRequest() 的取法，脚本经 nd.vars 读到的是发送这一刻的值。
+    preScript: request.preScript,
+    sendScript: request.sendScript,
+    receiveScript: request.receiveScript,
+    vars: { ...getVars() },
   };
 
   session.connId = params.id;
@@ -262,6 +305,12 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
       appendLog(entry);
       return;
     }
+    case "script": {
+      // 脚本执行报告：console 输出、nd.test 结果、错误与写回的变量。
+      const report = event.script;
+      if (report !== undefined) handleScriptReport(report);
+      return;
+    }
     case "error": {
       session.status = "closed";
       const reason = event.reason === undefined || event.reason === "" ? t("socket.connectError") : event.reason;
@@ -281,6 +330,58 @@ function handleEvent(params: SocketConnectParams, event: SocketEvent): void {
     default:
       return;
   }
+}
+
+function scriptPhase(value: string): ScriptPhase {
+  return value === "send" || value === "receive" ? value : "pre";
+}
+
+// 一条脚本执行报告 → 若干系统行。console 输出只按级别着色（log 灰 / warn 橙 /
+// error 红，同 HTTP 控制台页），阶段靠徽标标注；nd.test 结果 ✓ 绿 / ✗ 红，失败
+// 附 error。错误行同时进错误条；预连接脚本出错时后端根本不拨号，会话收尾成 closed。
+function handleScriptReport(report: SocketScriptReport): void {
+  const phase = scriptPhase(report.phase);
+  const entries: SocketLogEntry[] = [];
+
+  for (const log of report.logs) {
+    entries.push({
+      id: newId(),
+      at: log.at > 0 ? log.at : Date.now(),
+      direction: "system",
+      payload: log.text,
+      isBinary: false,
+      tone: log.level === "error" ? "error" : log.level === "warn" ? "warn" : "muted",
+      phase,
+    });
+  }
+
+  for (const test of report.tests) {
+    const mark = test.pass ? "✓" : "✗";
+    const detail = test.pass || test.error === "" ? "" : `\n${test.error}`;
+    entries.push({
+      id: newId(),
+      at: Date.now(),
+      direction: "system",
+      payload: `${mark} ${test.name}${detail}`,
+      isBinary: false,
+      tone: test.pass ? "pass" : "error",
+      phase,
+    });
+  }
+
+  if (report.error !== "") {
+    entries.push({ ...systemMessage("socket.scriptError", { error: report.error }, "error"), phase });
+    // 预连接脚本出错 = 连接不会建立：状态先收尾，下面的通知才会画出「已断开」。
+    if (phase === "pre") session.status = "closed";
+  }
+
+  appendLogs(entries);
+
+  if (report.error !== "") updateResponse({ error: t("socket.scriptError", { error: report.error }) });
+
+  // 变量写回与 HTTP 同款：后端给的是脚本写回后的全量快照，带脚本时无条件下发
+  //（脚本删光变量时的空对象也要生效）；内容真变时 setVars 自己会置脏。
+  setVars(report.vars);
 }
 
 function closeText(event: SocketEvent): string {
