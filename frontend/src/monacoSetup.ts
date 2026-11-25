@@ -361,6 +361,12 @@ interface NDTime {
 interface ND {
   /** 变量表：脚本写回后随响应返回，并同步到界面的变量区。 */
   vars: NDVars;
+  /**
+   * 弹输入框请用户输入一个值：阻塞到用户确认，把值写入变量 name 并作为返回值，
+   * 脚本随后继续执行。等待期间脚本不计时（不会触发超时）；用户点「取消」会抛
+   * 异常，可 try/catch 后自己兜底。
+   */
+  input(name: string, prompt?: string): string;
   /** 请求信息；预执行脚本可写。 */
   request: NDRequest;
   /** 连接消息；仅 WebSocket / TCP / Socket.IO 的发送脚本与接收脚本可用。 */

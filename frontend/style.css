@@ -2493,6 +2493,35 @@ button:disabled {
   background: var(--accent-hover);
 }
 
+/* ---- nd.input 输入框（复用 close-confirm 的模态外观） ---- */
+
+.script-input-prompt {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.script-input-field {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  margin-top: 12px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.script-input-field:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 
 /* ---- 侧栏底部设置入口 ---- */
 

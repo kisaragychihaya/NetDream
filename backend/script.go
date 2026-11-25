@@ -99,13 +99,14 @@ func scriptText(text string) string {
 // reports the console lines and tests it produced, with the variables as they
 // came in.
 func runPreScript(ctx context.Context, code string, req *APIRequest, vars map[string]string) (*scriptOutcome, error) {
-	return runPreScriptWithin(ctx, code, req, vars, scriptTimeout)
+	return runPreScriptWithin(ctx, code, req, vars, scriptTimeout, nil)
 }
 
 // runPreScriptWithin is runPreScript with the caller's own deadline: a composer
 // call decides how long an entry's own script may take, while a hook keeps
-// scriptTimeout.
-func runPreScriptWithin(ctx context.Context, code string, req *APIRequest, vars map[string]string, timeout time.Duration) (out *scriptOutcome, err error) {
+// scriptTimeout. parent is the surrounding run's clock (a composer run): waiting
+// on the user in this script pauses that one too.
+func runPreScriptWithin(ctx context.Context, code string, req *APIRequest, vars map[string]string, timeout time.Duration, parent *scriptClock) (out *scriptOutcome, err error) {
 	out = &scriptOutcome{vars: vars}
 	var run *scriptRun
 	defer func() {
@@ -118,7 +119,7 @@ func runPreScriptWithin(ctx context.Context, code string, req *APIRequest, vars 
 	}()
 
 	run = newScriptRun(preScriptKind, req, nil, vars)
-	if runErr := run.executeWithin(ctx, code, timeout); runErr != nil {
+	if runErr := run.executeScript(ctx, code, timeout, parent); runErr != nil {
 		return run.outcome(vars), runErr
 	}
 	run.applyRequest(req)
@@ -128,11 +129,11 @@ func runPreScriptWithin(ctx context.Context, code string, req *APIRequest, vars 
 // runPostScript runs code against the request and the response it produced.
 // Nothing it does reaches the request: a post script is a read-only view.
 func runPostScript(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string) (*scriptOutcome, error) {
-	return runPostScriptWithin(ctx, code, req, resp, vars, scriptTimeout)
+	return runPostScriptWithin(ctx, code, req, resp, vars, scriptTimeout, nil)
 }
 
 // runPostScriptWithin is runPostScript with the caller's own deadline.
-func runPostScriptWithin(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string, timeout time.Duration) (out *scriptOutcome, err error) {
+func runPostScriptWithin(ctx context.Context, code string, req *APIRequest, resp *APIResponse, vars map[string]string, timeout time.Duration, parent *scriptClock) (out *scriptOutcome, err error) {
 	out = &scriptOutcome{vars: vars}
 	var run *scriptRun
 	defer func() {
@@ -145,7 +146,7 @@ func runPostScriptWithin(ctx context.Context, code string, req *APIRequest, resp
 	}()
 
 	run = newScriptRun(postScriptKind, req, resp, vars)
-	if runErr := run.executeWithin(ctx, code, timeout); runErr != nil {
+	if runErr := run.executeScript(ctx, code, timeout, parent); runErr != nil {
 		return run.outcome(vars), runErr
 	}
 	return run.outcome(run.exportedVars()), nil
@@ -182,9 +183,11 @@ func newScriptRunReport(kind string, vars map[string]string, report ndapi.Record
 		report = run
 	}
 	run.api = ndapi.NewRun(vm, vars, report)
+	run.api.BindInput(scriptInputBridge)
 
 	nd := vm.NewObject()
 	_ = nd.Set("vars", run.api.VarsGlobal())
+	_ = nd.Set("input", run.api.InputGlobal())
 	_ = nd.Set("test", run.api.TestGlobal())
 	_ = nd.Set("assert", run.api.AssertGlobal())
 	_ = nd.Set("crypto", run.api.CryptoGlobal())
@@ -245,28 +248,48 @@ func (run *scriptRun) execute(ctx context.Context, code string) error {
 // executeWithin is execute with the run's own deadline: a hook gets
 // scriptTimeout, while a composer run legitimately waits on the requests it
 // calls and gets however long the page allowed.
-func (run *scriptRun) executeWithin(ctx context.Context, code string, timeout time.Duration) (err error) {
+func (run *scriptRun) executeWithin(ctx context.Context, code string, timeout time.Duration) error {
+	return run.executeScript(ctx, code, timeout, nil)
+}
+
+// executeScript runs code on a fresh clock of its own. parent is the clock of
+// the surrounding run (a composer calling one of its entries): waiting on the
+// user in this script pauses that clock too, so a run never times out while
+// someone is typing into a nested script's input box.
+func (run *scriptRun) executeScript(ctx context.Context, code string, timeout time.Duration, parent *scriptClock) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// 预算到点 = 超时：取消这次运行的 ctx，纯 Go 里烧时间的调用
+	// （nd.crypto.pbkdf2）随它停下；JS 侧的打断由 executeOnClock 的 watcher 负责。
+	clock := newScriptClock(timeout, parent, cancel)
+	defer clock.stop()
+	return run.executeOnClock(runCtx, code, clock)
+}
+
+// executeOnClock runs code on the caller's clock. One lifetime for both ways a
+// run can stop: the vm interrupt below covers code that stays in JS, and the
+// same context reaches the Go-side calls that an interrupt cannot touch. The
+// clock pauses while the script waits on the user (nd.input), so time spent
+// typing is not billed against the script's deadline.
+func (run *scriptRun) executeOnClock(ctx context.Context, code string, clock *scriptClock) (err error) {
 	vm := run.vm
 
-	// One deadline for both ways a run can stop: the vm interrupt below covers
-	// code that stays in JS, and the same context reaches the Go-side calls
-	// (nd.crypto.pbkdf2) that an interrupt cannot touch.
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	run.api.BindContext(runCtx)
+	run.api.BindContext(ctx)
+	run.api.BindClock(clock)
 
 	stop := make(chan struct{})
 	watchdone := make(chan struct{})
 	go func() {
 		defer close(watchdone)
 		select {
-		case <-runCtx.Done():
-			// A deadline means the script took too long; the parent ending means
-			// the page cancelled it. The message differs, so tell them apart.
-			if ctx.Err() != nil {
-				vm.Interrupt(scriptCancelReason)
-			} else {
+		case <-ctx.Done():
+			// An expired clock means the script took too long; the context ending
+			// on its own means the page cancelled it. The message differs, so
+			// tell them apart.
+			if clock.TimedOut() {
 				vm.Interrupt(scriptTimeoutReason)
+			} else {
+				vm.Interrupt(scriptCancelReason)
 			}
 		case <-stop:
 		}
@@ -279,12 +302,12 @@ func (run *scriptRun) executeWithin(ctx context.Context, code string, timeout ti
 	}()
 	defer func() {
 		if r := recover(); r != nil {
-			err = scriptFailureWithin(run.kind, panicError(r), timeout)
+			err = scriptFailureWithin(run.kind, panicError(r), clock.budget())
 		}
 	}()
 
 	if _, runErr := vm.RunString(code); runErr != nil {
-		return scriptFailureWithin(run.kind, runErr, timeout)
+		return scriptFailureWithin(run.kind, runErr, clock.budget())
 	}
 	return nil
 }

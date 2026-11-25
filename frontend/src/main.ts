@@ -15,6 +15,7 @@ import { mountMarkdownEditor } from "./components/markdownEditor";
 import { mountResponseView } from "./components/responseView";
 import { mountSaveDialog } from "./components/saveDialog";
 import { mountScriptEditor } from "./components/scriptEditor";
+import { mountScriptInputDialog } from "./components/scriptInput";
 import { mountSettings } from "./components/settings";
 import { mountSocketComposer, mountSocketSettings } from "./components/socketComposer";
 import { mountSocketEventsEditor } from "./components/socketEventsEditor";
@@ -24,7 +25,7 @@ import { mountUrlBar } from "./components/urlBar";
 import { mountWorkspaceSidebar } from "./components/workspaceSidebar";
 import { applyStatic, onLangChange, t } from "./i18n";
 import type { APIRequest, SavedRequest, SSEMessage, WorkspaceFile, WorkspaceOpen } from "./mygo";
-import { IdentityService, RequestService, WorkspaceService, events, type WorkspaceData } from "./mygo";
+import { IdentityService, RequestService, ScriptService, WorkspaceService, events, type WorkspaceData } from "./mygo";
 import { isMyGo } from "./runtime";
 import { requireScriptTrust } from "./scriptGate";
 import { mountExamplePicker, type ScriptExampleContext } from "./scriptExamples";
@@ -970,6 +971,16 @@ try {
 
 const settingsDialog = mountSettings();
 
+// nd.input 的输入框：脚本阻塞等回答，确认/取消都经 ScriptService 递回后端；
+// 投递失败只说明那次运行已经结束（取消/超时），回答无处可去，吞掉即可。
+const scriptInputDialog = mountScriptInputDialog({
+  resolve: (id, value, ok) => {
+    void ScriptService.resolveInput(id, value, ok).catch(() => {
+      // 那次脚本运行已经结束，回答递不到也没有别的补救。
+    });
+  },
+});
+
 mountWorkspaceSidebar(sidebar, {
   open: () => void openWorkspace(),
   save: () => void saveWorkspace(false),
@@ -1032,6 +1043,10 @@ if (isMyGo()) {
       proceed: closeWindow,
     });
   });
+
+  // 脚本里的 nd.input：Go 侧阻塞等回答，这里排队弹输入框；运行先结束就收框。
+  events.scriptInputRequested.on((request) => scriptInputDialog.enqueue(request));
+  events.scriptInputRetracted.on((id) => scriptInputDialog.retract(id));
 
   // 首次运行：本机还没有身份时先问一次（一次性，不可绕过）。取身份只是读一个
   // 本地文件，失败不阻塞界面——需要身份的功能自己会再报错。

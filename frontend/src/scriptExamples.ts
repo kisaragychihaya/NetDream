@@ -160,6 +160,42 @@ if (body.startsWith("{")) {
 `,
       },
     },
+    {
+      name: {
+        "zh-CN": "弹窗请用户输入 token",
+        "en-US": "Ask for a token in a dialog",
+        ja: "ダイアログでトークンを尋ねる",
+      },
+      code: {
+        "zh-CN": `// 弹输入框请用户填 token：确认后写入变量 token 并继续，之后可用 {{token}} 或
+// nd.vars.get("token") 引用；用户点「取消」会抛异常，catch 后按匿名继续。
+// 等待输入期间脚本不计时，想多久都不会触发超时。
+try {
+  nd.input("token", "请输入本次要用的访问令牌");
+} catch (e) {
+  console.warn("没有输入 token，按匿名继续");
+}
+`,
+        "en-US": `// Ask for a token in a dialog: confirming stores it in the token variable, usable later as
+// {{token}} or nd.vars.get("token"); cancelling throws, so catch it and continue anonymously.
+// The script is not timed while it waits, so thinking time never trips the timeout.
+try {
+  nd.input("token", "Paste the access token for this run");
+} catch (e) {
+  console.warn("No token entered, continuing anonymously");
+}
+`,
+        ja: `// 入力ダイアログでトークンを尋ねます：確認すると変数 token に書き込まれ、以後
+// {{token}} や nd.vars.get("token") で使えます。「キャンセル」は例外になるので
+// catch して匿名で続行します。待機中はスクリプトの計時は止まります。
+try {
+  nd.input("token", "今回使うアクセストークンを入力してください");
+} catch (e) {
+  console.warn("トークン未入力のため匿名で続行します");
+}
+`,
+      },
+    },
   ],
 
   "http-post": [
@@ -606,6 +642,53 @@ const profile = nd.composer.run("プロフィール", {
   vars: { token: token, client: "netdream" },
 });
 nd.test("プロフィールが 2xx", () => nd.assert(profile.status < 300, "status=" + profile.status));
+`,
+      },
+    },
+    {
+      name: {
+        "zh-CN": "运行前弹窗询问参数",
+        "en-US": "Ask for a parameter up front",
+        ja: "実行前にパラメータを尋ねる",
+      },
+      code: {
+        "zh-CN": `// 运行开始先弹输入框问参数：确认后写入变量并继续，后面的调用经 nd.vars.get 读取；
+// 用户点「取消」会抛异常，catch 后给个默认值兜底。等待输入期间整个运行不计时。
+try {
+  nd.input("keyword", "要搜索的关键词？");
+} catch (e) {
+  nd.vars.set("keyword", "默认");
+}
+console.log("关键词", nd.vars.get("keyword"));
+
+const res = nd.composer.run("搜索");
+nd.test("搜索返回 2xx", () => nd.assert(res.status < 300, "status=" + res.status));
+`,
+        "en-US": `// Ask for a parameter up front: confirming stores it in a variable and the run continues;
+// later calls read it with nd.vars.get. Cancelling throws, so catch it and fall back to a
+// default. The whole run is not timed while it waits for the input.
+try {
+  nd.input("keyword", "Keyword to search for?");
+} catch (e) {
+  nd.vars.set("keyword", "default");
+}
+console.log("keyword", nd.vars.get("keyword"));
+
+const res = nd.composer.run("Search");
+nd.test("Search returns 2xx", () => nd.assert(res.status < 300, "status=" + res.status));
+`,
+        ja: `// 実行開始時にパラメータを尋ねます：確認すると変数に書き込まれ、以後の呼び出しは
+// nd.vars.get で読みます。「キャンセル」は例外になるので catch して既定値にします。
+// 入力を待っている間、実行全体の計時は止まります。
+try {
+  nd.input("keyword", "検索キーワードは？");
+} catch (e) {
+  nd.vars.set("keyword", "default");
+}
+console.log("keyword", nd.vars.get("keyword"));
+
+const res = nd.composer.run("検索");
+nd.test("検索が 2xx", () => nd.assert(res.status < 300, "status=" + res.status));
 `,
       },
     },

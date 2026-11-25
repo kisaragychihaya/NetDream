@@ -68,6 +68,15 @@ type ScriptTest struct {
 	Error string `json:"error"` // failure message; empty when passed
 }
 
+// ScriptInputRequest 是 script:inputRequested 事件的负载：一次 nd.input 调用
+// 请页面弹出带提示的输入框。脚本阻塞等回答，页面经 ScriptService.ResolveInput
+// 把用户确认的值（或取消）送回。
+type ScriptInputRequest struct {
+	ID     string `json:"id"`     // 这次输入请求的 id，回答时原样带回
+	Name   string `json:"name"`   // 要写入的变量名
+	Prompt string `json:"prompt"` // 输入框里的提示；空 = 只显示变量名
+}
+
 // SocketScriptReport 是一次连接脚本运行的产物，随 Type="script" 的 SocketEvent
 // 下发：页面据此展示「预连接/发送/接收」脚本的日志、测试与写回的变量。
 type SocketScriptReport struct {

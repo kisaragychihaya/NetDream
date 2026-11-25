@@ -75,6 +75,9 @@ type composerHost struct {
 
 	vm     *goja.Runtime
 	script *scriptRun
+	// clock 是整个运行共用的时间预算：composer 脚本与被调条目的脚本等用户输入
+	// （nd.input）时都暂停它；到点取消 ctx，在途请求与脚本一起结束。
+	clock *scriptClock
 
 	// reportMu serializes the run's reports, so the page sees them in one order
 	// even when a background connection's goroutine reports a lifecycle line, and
@@ -182,21 +185,26 @@ func composerEmitter(stream *mygo.Channel[ComposerEvent]) func(ComposerEvent) er
 // start runs the composer script and reports what it did. Every run ends with a
 // done event; the result is that event's counts and reason.
 func (h *composerHost) start() ComposerResult {
-	runCtx, cancel := context.WithTimeout(h.ctx, h.timeout)
+	outer := h.ctx
+	runCtx, cancel := context.WithCancel(outer)
 	defer cancel()
 	h.ctx = runCtx
+	// 整个运行一份预算：到点取消 runCtx——在途请求随 ctx 结束，脚本侧由
+	// executeOnClock 的 watcher 打断。等用户输入时它暂停，想多久都不算超时。
+	h.clock = newScriptClock(h.timeout, nil, cancel)
+	defer h.clock.stop()
 
 	h.script = newScriptRunReport(composerScriptKind, h.vars, h)
 	h.vm = h.script.vm
 	h.script.setND("composer", h.composerGlobal())
 
-	err := h.script.executeWithin(runCtx, h.code, h.timeout)
+	err := h.script.executeOnClock(runCtx, h.code, h.clock)
 	// 运行自己的上下文先结束，才是超时或取消；脚本自己的错误按原话报告。
 	reason := ""
 	switch {
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+	case h.clock.TimedOut():
 		reason = fmt.Sprintf("运行超时：超过 %s 未完成，已中断", h.timeout)
-	case errors.Is(runCtx.Err(), context.Canceled):
+	case outer.Err() != nil:
 		reason = "运行已取消"
 	case err != nil:
 		reason = err.Error()
@@ -494,7 +502,7 @@ func (h *composerHost) call(ref string, opts composerOptions) goja.Value {
 		req.Timeout = opts.timeout
 	}
 	if entry.PreScript != "" {
-		out, preErr := runPreScriptWithin(h.ctx, entry.PreScript, &req, vars, opts.scriptTimeout)
+		out, preErr := runPreScriptWithin(h.ctx, entry.PreScript, &req, vars, opts.scriptTimeout, h.clock)
 		if out != nil {
 			h.absorb(entryName, out)
 			vars = out.vars
@@ -522,7 +530,7 @@ func (h *composerHost) call(ref string, opts composerOptions) goja.Value {
 
 	postError := ""
 	if entry.PostScript != "" {
-		out, postErr := runPostScriptWithin(h.ctx, entry.PostScript, &req, &resp, vars, opts.scriptTimeout)
+		out, postErr := runPostScriptWithin(h.ctx, entry.PostScript, &req, &resp, vars, opts.scriptTimeout, h.clock)
 		if out != nil {
 			h.absorb(entryName, out)
 			vars = out.vars

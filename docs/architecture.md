@@ -19,9 +19,12 @@ backend/
   composer_test.go     # composer 运行测试（httptest 真实服务）：串行调用/解析/选项/SSE/取消/超时/保留上限
   composer_socket_test.go # 连接句柄测试（WS/TCP/Socket.IO 回显与静默服务）：非阻塞 open/超时/Stop 唤醒/ack 透传
   grpc.go              # GrpcService 薄壳：List/Connect/Send/CloseSend/Disconnect 转调 protocol + *mygo.Channel[GrpcEvent]→protocol.GrpcSink 适配
-  script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、5s 超时与页面关闭中断、{{var}} 替换、预脚本写回请求
+  script.go            # 脚本引擎（goja）：VM 创建与 nd/console 注册、超时与页面关闭中断、{{var}} 替换、预脚本写回请求
+  script_clock.go      # 脚本的时间预算：可暂停时钟（nd.input 等用户输入时停表），parent 链把嵌套脚本的暂停传给 composer 运行
+  script_input.go      # nd.input 桥：script:inputRequested 事件 + 待答登记 + ScriptService.ResolveInput
+  script_input_test.go # 时钟暂停/嵌套/父子链、nd.input 往返/取消/无页面、composer 与嵌套条目脚本的暂停
   script_test.go       # 脚本日志/测试结果的保留上限、按 rune 截断、Go 侧 pbkdf2 的可取消性
-  ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/request/response/test/assert/crypto/time、console，记录交主包 Recorder
+  ndapi/               # 脚本的 ND API（package ndapi）：nd.vars/input/request/response/test/assert/crypto/time、console，记录交主包 Recorder
   workspace.go         # WorkspaceService：Open/OpenPath/Save/SaveAs + .band（zip）读写 + 请求树归一化
   workspace_test.go    # .band 往返、旧格式兼容、folders 归一化（readBandBytes/writeBand）
   workspace_limits_test.go # .band 解压限额（单条/累计/归档本身）与 zip bomb 拒绝
@@ -68,6 +71,7 @@ frontend/
       workspaceSidebar.ts # 工作区侧栏（新建/打开/保存/另存 + 新建请求菜单 + 变量区 + 请求列表）
       closeConfirm.ts  # 通用三键确认框（未保存守卫：窗口关闭 / 新建工作区 / 打开 / 拖入）
       scriptTrust.ts   # 脚本信任确认框（打开的 .band 带脚本时，首次执行脚本前问一次；HTTP send 与 socket connect 经 scriptGate.ts 共用）
+      scriptInput.ts   # nd.input 输入框（模态 + 队列：多个脚本同时等输入时逐个弹；确认把值递回脚本，取消让脚本吃到可 catch 的错）
   src/mygo.ts          # `mygo generate` 生成，禁止手改
   style.css
 scripts/
@@ -82,7 +86,7 @@ resources/
 
 ## IPC 契约（backend/types.go + backend/service.go + backend/socket.go + backend/workspace.go，唯一事实来源）
 
-`mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, GrpcService{}, AppService{}, IdentityService{})` 绑定。注意：**结构体的所有导出方法都会被绑定**，
+`mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, GrpcService{}, ComposerService{}, ScriptService{}, AppService{}, IdentityService{})` 绑定。注意：**结构体的所有导出方法都会被绑定**，
 各 Service 上只允许出现契约列出的导出方法（helper 必须小写或未导出）。
 方法在自己的 goroutine 运行；第一个参数可为 `context.Context`（页面关闭自动取消）。
 方法返回可以是 `error`、`(T, error)` 或无返回（mygo 反射均支持）。
@@ -186,6 +190,15 @@ type ScriptTest struct {
 	Name  string `json:"name"`
 	Pass  bool   `json:"pass"`
 	Error string `json:"error"` // 失败原因；通过为空
+}
+
+// ScriptInputRequest 是 script:inputRequested 事件的负载：一次 nd.input 调用
+// 请页面弹出带提示的输入框。脚本阻塞等回答，页面经 ScriptService.ResolveInput
+// 把用户确认的值（或取消）送回。
+type ScriptInputRequest struct {
+	ID     string `json:"id"`     // 这次输入请求的 id，回答时原样带回
+	Name   string `json:"name"`   // 要写入的变量名
+	Prompt string `json:"prompt"` // 输入框里的提示；空 = 只显示变量名
 }
 
 // SSE：流式响应（Content-Type: text/event-stream）。Send 先推一个 Open，
@@ -317,12 +330,17 @@ type SocketEvent struct {
   - 后执行脚本（PostScript 非空）：拿到响应后执行（SSE 在流正常结束后，Body 为空）；
     出错只记 `PostScriptError`，已拿到的响应保留。
   - 脚本 API（同步；单次 5s 超时 + 页面关闭取消）：
-    - 两条停止路径共用同一个 `context.WithTimeout(ctx, 5s)`：停在 JS 里的（死循环、
-      `nd.test` 内的死循环）由 `vm.Interrupt` 打断；纯 Go 里烧时间的
-      `nd.crypto.pbkdf2`（10M 轮上限，能跑满好几秒）在循环里每 256 轮看一眼这个
-      context，自己抛 `ndapi.AbortError` 提前退出（`vm.Interrupt` 到不了 Go 循环）。
-      两者最终都报既有的「超时：超过 5s 未执行完，已中断」/「已取消」两条消息。
+    - 每次运行一份 `scriptClock` 时间预算（backend/script_clock.go）：到点取消运行
+      ctx——停在 JS 里的（死循环、`nd.test` 内的死循环）由 watcher 经 `vm.Interrupt`
+      打断；纯 Go 里烧时间的 `nd.crypto.pbkdf2`（10M 轮上限，能跑满好几秒）在循环里
+      每 256 轮看一眼这个 context，自己抛 `ndapi.AbortError` 提前退出（`vm.Interrupt`
+      到不了 Go 循环）。两者最终都报既有的「超时：超过 5s 未执行完，已中断」/「已取消」
+      两条消息（时钟到点还是页面取消，经 `clock.TimedOut()` 区分）。
     - `nd.vars`：get/set/unset/has/toObject（快照进、全量出，写回经 APIResponse.Vars）
+    - `nd.input(name, prompt?)`：弹输入框请用户输入，阻塞到确认后把值写入变量 name
+      并作为返回值（所有钩子与 composer 脚本可用）；**等待期间时间预算暂停**
+      （Pause/Resume），用户的思考时间不算进超时；用户点「取消」抛可 try/catch 的
+      Error，页面关闭/运行终止按「已取消」结束（见「ScriptService」节）
     - `nd.request`：`{method,url,headers,query,body}`；预脚本可写并回写 DTO
       （headers/query 大小写不敏感 diff：消失或 null 删除、新写法覆盖；body 改了则
       BodyType=raw、RawType 空补 text），后脚本为只读快照
@@ -515,7 +533,9 @@ Composer 自动化编排：整个条目就是一个 goja 脚本，`nd.composer.r
 
 - `Run(ctx, params ComposerRunParams, stream *mygo.Channel[ComposerEvent]) (ComposerResult, error)`
   — 发起运行，存续期间不返回；**整体超时 `Timeout`（0=60s）同时管 JS 与在途请求**
-  （composer 脚本合法地要等多个请求，不用普通脚本的 5s）。
+  （composer 脚本合法地要等多个请求，不用普通脚本的 5s）。整个运行共用一份
+  `scriptClock` 预算：composer 脚本与被调条目的脚本里 `nd.input` 等用户输入时
+  预算暂停（嵌套脚本经 parent 链上传），到点取消运行 ctx——在途请求与脚本一起结束。
   - `params.Requests` 是前端传的工作区条目快照（已剔除 examples 重字段）——后端不持有
     工作区，条目解析：`run(nameOrId)` 先按 ID 精确、再按 Name 精确，0 个/重名抛错。
   - 变量池：`nd.vars` 与被调条目的脚本共用一份（调用前 pull、调用后 push），
@@ -545,6 +565,24 @@ Composer 自动化编排：整个条目就是一个 goja 脚本，`nd.composer.r
     `运行已取消` / 脚本错误原文。脚本错误也经 done 表达，Run 的 error 只留给注册失败。
 - `Stop(id string)` — 取消进行中的运行（ctx 取消：goja Interrupt + 在途请求中止 +
   阻塞 receive 唤醒）；不存在静默返回。
+
+### ScriptService（backend/script_input.go）
+
+`nd.input(name, prompt?)` 的页面桥：脚本在 Go 侧阻塞等回答，页面弹模态输入框
+（components/scriptInput.ts，单例 + 队列——多个脚本同时等输入时逐个弹）。
+
+- 事件 `script:inputRequested`（负载 `ScriptInputRequest{id,name,prompt}`）：桥接经
+  `mygo.CallerPage(ctx)` 发到**发起这次运行的页面**；没有页面（纯后端/测试）时
+  `nd.input` 抛「当前没有可交互的页面」（可 try/catch）。
+- 事件 `script:inputRetracted`（负载为请求 id）：等回答的运行先结束（页面关闭、
+  composer 终止）时收回还开着的输入框——排队中的摘掉、展示中的关掉换下一个；
+  与用户回答撞车时两边都按 id 对不上静默忽略。
+- `ResolveInput(id string, value string, ok bool)` — 页面对一次输入的回答：
+  `ok=true` 把 value 写进脚本要的变量并唤醒脚本；`ok=false`（用户取消）让脚本吃到
+  「用户取消了输入」的可 catch 错误。不存在或已回答的 id 静默忽略（幂等，同
+  Stop/Disconnect 语义）；迟到的回答（脚本已被取消）丢弃。
+- 等待期间这次运行的时间预算暂停（`scriptClock.Pause/Resume`）；页面关闭 / composer
+  终止取消运行 ctx，桥接返回 `ndapi.AbortError`，按既有的「已取消」中断路径报告。
 
 ### 工作区（.band）
 

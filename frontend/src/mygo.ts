@@ -425,6 +425,20 @@ export interface SavedSocketEvent {
   description: string;
 }
 
+/**
+ * ScriptInputRequest 是 script:inputRequested 事件的负载：一次 nd.input 调用
+ * 请页面弹出带提示的输入框。脚本阻塞等回答，页面经 ScriptService.ResolveInput
+ * 把用户确认的值（或取消）送回。
+ */
+export interface ScriptInputRequest {
+  /** 这次输入请求的 id，回答时原样带回 */
+  id: string;
+  /** 要写入的变量名 */
+  name: string;
+  /** 输入框里的提示；空 = 只显示变量名 */
+  prompt: string;
+}
+
 /** ScriptLog is one console.log/warn/error call from a pre/post script. */
 export interface ScriptLog {
   /** "log" | "warn" | "error" */
@@ -732,6 +746,18 @@ export const ComposerService = {
 } as const;
 
 /**
+ * ScriptService 暴露脚本运行与页面之间的交互。Every exported method here is
+ * bound to the frontend, so helpers stay unexported.
+ */
+export const ScriptService = {
+  /**
+   * ResolveInput 回答一次 nd.input：value 写进脚本要的变量，ok=false 表示用户取消。
+   * 不存在或已回答的 id 静默忽略（与 Stop/Disconnect 的幂等语义一致）。
+   */
+  resolveInput: bind<[string, string, boolean], void>("ScriptService.ResolveInput", (id: string, value: string, ok: boolean) => [id, value, ok]),
+} as const;
+
+/**
  * AppService 暴露应用自身的信息与桌面集成能力。
  * Every exported method here is bound to the frontend, so helpers stay unexported.
  */
@@ -790,4 +816,15 @@ export const events = {
    * WorkspaceService.CloseWindow (discard the changes).
    */
   workspaceCloseRequested: event<boolean>("workspace:closeRequested"),
+  /**
+   * scriptInputRequested 请页面为一次 nd.input 弹出输入框：脚本阻塞在 Go 侧等回答，
+   * 页面弹模态框，用户确认或取消后经 ScriptService.ResolveInput 回来。
+   */
+  scriptInputRequested: event<ScriptInputRequest>("script:inputRequested"),
+  /**
+   * scriptInputRetracted 收回一个还开着的输入框：等回答的运行已经结束（页面关闭、
+   * composer 终止），负载是那次输入请求的 id。回答与撤回撞车时页面两个都认得：
+   * 已回答的框不在了就忽略撤回，没回答的框被撤回后回答也递不到（幂等丢弃）。
+   */
+  scriptInputRetracted: event<string>("script:inputRetracted"),
 } as const;

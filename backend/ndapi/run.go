@@ -34,6 +34,10 @@ type Run struct {
 	// original.
 	messagePayload string
 	report         Recorder
+	// input 是 nd.input 的桥接（BindInput 装上），clock 是等用户输入时暂停的
+	// 时间预算（BindClock 装上）；没装时钟时 nd.input 不暂停任何计时。
+	input InputBridge
+	clock WaitClock
 }
 
 // NewRun builds the ND API state of one run on vm: nd.vars holds vars as it came
@@ -74,7 +78,12 @@ func (e *AbortError) Error() string {
 
 // abort reports why run.ctx ended, as the error a long call raises.
 func (run *Run) abort() *AbortError {
-	return &AbortError{Canceled: errors.Is(run.ctx.Err(), context.Canceled)}
+	canceled := errors.Is(run.ctx.Err(), context.Canceled)
+	// 时钟到点也会取消 ctx：那是超时，不是页面取消。
+	if canceled && run.clock != nil && run.clock.TimedOut() {
+		canceled = false
+	}
+	return &AbortError{Canceled: canceled}
 }
 
 // ExportedVars reads the variable object back into a plain map: whatever the

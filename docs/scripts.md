@@ -13,13 +13,49 @@ NetDream 的脚本在 Go 后端经 goja（JavaScript 引擎）执行，单次 5 
 | 发送脚本 | WS / Socket.IO / TCP | `nd.message.payload`、`nd.vars` | 该条消息不发送 |
 | 接收脚本 | WS / Socket.IO / TCP | `nd.vars` | 只记错误，消息不受影响 |
 
-通用 API：`nd.vars`（get/set/unset/has/toObject）、`nd.test(name, fn)`、`nd.assert(cond, msg)`、
+通用 API：`nd.vars`（get/set/unset/has/toObject）、`nd.input(name, prompt?)`（弹输入框，
+见下节）、`nd.test(name, fn)`、`nd.assert(cond, msg)`、
 `nd.crypto`（md5/sha1/sha256/sha512、hmac、base64(+url)、hex、aesEncrypt/aesDecrypt、randomBytes/randomHex）、
 `nd.time`（now/unix/format/parse/offset/zone）、`console.log/warn/error`（进「控制台」页签或连接日志）。
 脚本编辑器页顶部的「插入范例」按钮内置了本文的大部分范例。
 
 > 注意：`nd.vars` 是方法式 API——读写变量一律用 `nd.vars.get("name")` / `nd.vars.set("name", value)`，
 > `nd.vars.name` 这样的属性直读永远是 `undefined`（`get` 对不存在的变量返回 `null`）。
+
+## 弹窗输入（nd.input）
+
+`nd.input("var_name", "提示语")` 阻塞脚本并弹出带提示的输入框；用户输入并点击确认后，
+值写入变量 `var_name`（与 `nd.vars.set` 同一份数据）并作为返回值，脚本继续执行。
+所有脚本上下文可用：HTTP 预/后执行、连接三钩子、Composer。
+
+- **等待期间不计时**：脚本自己的 5s 超时、composer 整个运行的预算（含被调条目脚本
+  里的等待）都暂停，想多久都不会触发超时。
+- 用户点「取消」（或 Esc）抛可 `try/catch` 的 Error（「用户取消了输入」），脚本可
+  兜底后继续；页面关闭 / 运行终止按「已取消」结束整个运行，还开着的输入框会被
+  后端发事件收回（不会留着一个永远等不到回答的框）。
+- 多个脚本同时等输入时页面逐个弹框回答；没有页面的环境（纯后端）抛
+  「当前没有可交互的页面」。
+
+HTTP 预执行脚本里询问 token（取消就按匿名继续）：
+
+```js
+try {
+  nd.input("token", "请输入本次要用的访问令牌");
+} catch (e) {
+  console.warn("没有输入 token，按匿名继续");
+}
+```
+
+Composer 运行前询问参数（被调条目脚本里的 nd.input 同样暂停整个运行）：
+
+```js
+try {
+  nd.input("keyword", "要搜索的关键词？");
+} catch (e) {
+  nd.vars.set("keyword", "默认");
+}
+const res = nd.composer.run("搜索");
+```
 
 ## HTTP 预执行脚本
 

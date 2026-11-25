@@ -23,7 +23,7 @@ const (
 )
 
 func main() {
-	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, GrpcService{}, ComposerService{}, AppService{}, IdentityService{})
+	mygo.Bind(RequestService{}, WorkspaceService{}, SocketService{}, GrpcService{}, ComposerService{}, ScriptService{}, AppService{}, IdentityService{})
 
 	// 应用界面支持的语言（第一个是回退语言）。不调 SetLanguages 时
 	// MyGo 只认英语，App.Locale()（即前端 mygo.locale）在任何语言的
