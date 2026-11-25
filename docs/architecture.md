@@ -1089,7 +1089,10 @@ export function runAssertions(rules: AssertionRule[], res: APIResponse): Asserti
     `<pre>` 内容，error/close 系统行红/灰着色），自动滚底，工具栏 清空 / 复制全部；
     响应头页 = 握手响应头表格（来自 open 事件，n 为数量）。
 - Path 页：从 URL 提取 `{placeholder}` 生成可编辑行；发送前把 `{k}` 替换为
-  `encodeURIComponent(v)`（前端完成，不进 IPC）。
+  `encodeURIComponent(v)`（前端完成，不进 IPC）。双花括号的 `{{var}}` 是后端变量
+  语法、不是路径占位符：提取与替换都跳过它（`pathPlaceholders`/`resolveURL`
+  用 `\{\{[^{}]*\}\}|\{([^{}]+)\}` 交替式先吞掉双花括号段），否则 `{{var}}`
+  的内层会被当成占位符替换成空值。
 - 发送流程：构造 `new Channel<SSEMessage>(handler)` 传给 `RequestService.send(req, channel)`；
   handler 收到 `open` 切到流式视图（展示状态/协议/响应头），收到 `event` 追加事件行；
   点击「停止」调 `channel.close()`（Go 侧 ctx 取消、请求中断），用户主动停止时

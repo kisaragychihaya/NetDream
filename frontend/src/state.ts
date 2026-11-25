@@ -804,20 +804,29 @@ export function loadSavedRequest(): void {
   applyRequest(next);
 }
 
+// {{var}} 是后端变量替换语法，不是路径占位符：交替式先整体吞掉双花括号段，
+// 只有单花括号 {k} 才会被提取/替换，{{var}} 原样留给后端 expandVars。
 export function pathPlaceholders(url: string): string[] {
   const names: string[] = [];
-  for (const match of url.matchAll(/\{([^{}]+)\}/g)) {
+  for (const match of url.matchAll(/\{\{[^{}]*\}\}|\{([^{}]+)\}/g)) {
     const name = match[1];
     if (name !== undefined && !names.includes(name)) names.push(name);
   }
   return names;
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function resolveURL(url: string, rows: readonly KVRow[]): string {
   let resolved = url;
   for (const row of rows) {
     if (!row.enabled || row.key === "") continue;
-    resolved = resolved.replaceAll(`{${row.key}}`, encodeURIComponent(row.value));
+    const pattern = new RegExp(`\\{\\{[^{}]*\\}\\}|\\{${escapeRegExp(row.key)}\\}`, "g");
+    resolved = resolved.replace(pattern, (match) =>
+      match.startsWith("{{") ? match : encodeURIComponent(row.value),
+    );
   }
   return resolved;
 }
